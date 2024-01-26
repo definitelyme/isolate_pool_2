@@ -463,6 +463,10 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
   _reuestIdCounter = 1000000000 *
       (params.isolateIndex +
           1); // split counters into ranges to deal with overlaps between isolates. Theoretically after one billion requests a collision might happen
+
+  // Call init() after the isolate is started and sendPort is passed back to the main isolate
+  await params.initFunc?.call();
+
   isolatePort.listen((message) async {
     if (message is _Request) {
       var req = message;
@@ -525,9 +529,6 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
       }
     }
   });
-
-  // Call init() after the isolate is started and sendPort is passed back to the main isolate
-  await params.initFunc?.call();
 }
 
 class _IsolateCallbackArg<A> {
