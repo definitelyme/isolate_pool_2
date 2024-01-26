@@ -155,8 +155,7 @@ class IsolatePool {
 
   //TODO consider adding timeouts
   final Map<int, Completer> _requestCompleters = {}; // requestId is key
-  Map<int, Completer<PooledInstanceProxy>> creationCompleters =
-      {}; // instanceId is key
+  Map<int, Completer<PooledInstanceProxy>> creationCompleters = {}; // instanceId is key
 
   /// Prepare the pool of [numberOfIsolates] isolates to be latter started by [IsolatePool.start]
   IsolatePool(this.numberOfIsolates);
@@ -167,8 +166,7 @@ class IsolatePool {
     if (state == IsolatePoolState.stoped) {
       throw 'Isolate pool has been stoped, cant schedule a job';
     }
-    _jobs[lastJobStartedIndex] =
-        _PooledJobInternal(job, lastJobStartedIndex, -1);
+    _jobs[lastJobStartedIndex] = _PooledJobInternal(job, lastJobStartedIndex, -1);
     var completer = Completer<T>();
     jobCompleters[lastJobStartedIndex] = completer;
     lastJobStartedIndex++;
@@ -189,17 +187,14 @@ class IsolatePool {
 
   /// Transfer [PooledInstance] to one of isolates, call it's [PooledInstance.init] method
   /// and make it avaialble for communication via the [PooledInstanceProxy] returned
-  Future<PooledInstanceProxy> addInstance(PooledInstance instance,
-      [PooledCallbak? callbak]) async {
+  Future<PooledInstanceProxy> addInstance(PooledInstance instance, [PooledCallbak? callbak]) async {
     var pi = PooledInstanceProxy._(instance._instanceId, this, callbak);
 
     var min = 10000000;
     var minIndex = 0;
 
     for (var i = 0; i < numberOfIsolates; i++) {
-      var x = _pooledInstances.entries
-          .where((e) => e.value.isolateIndex == i)
-          .fold(0, (int previousValue, _) => previousValue + 1);
+      var x = _pooledInstances.entries.where((e) => e.value.isolateIndex == i).fold(0, (int previousValue, _) => previousValue + 1);
       if (x < min) {
         min = x;
         minIndex = i;
@@ -218,10 +213,8 @@ class IsolatePool {
 
   void _runJobWithVacantIsolate() {
     var availableIsolate = _isolateBusyWithJob.indexOf(false);
-    if (availableIsolate > -1 &&
-        _jobs.entries.where((j) => j.value.started == false).isNotEmpty) {
-      var job =
-          _jobs.entries.where((j) => j.value.started == false).first.value;
+    if (availableIsolate > -1 && _jobs.entries.where((j) => j.value.started == false).isNotEmpty) {
+      var job = _jobs.entries.where((j) => j.value.started == false).first.value;
       job.isolateIndex = availableIsolate;
       job.started = true;
       _isolateSendPorts[availableIsolate]!.send(job);
@@ -233,8 +226,17 @@ class IsolatePool {
   double _avgMicroseconds = 0;
   List<ReceivePort> receivePorts = [];
 
-  /// Start the pool
-  Future start() async {
+  /// Starts the pool
+  ///
+  /// Params:
+  ///
+  /// - [init] - A function to be called on each isolate before it starts processing requests. You can use it to initialize
+  ///  isolate's state, (e.g. load data from file, connect to database, etc).
+  ///
+  /// Throws if:
+  /// - [init] is not a `top-level` function or a `static` method.
+  /// - invoking init() throws
+  Future start({FutureOr<void> Function()? init}) async {
     print('Creating a pool of $numberOfIsolates running isolates');
 
     _isolatesStarted = 0;
@@ -255,11 +257,14 @@ class IsolatePool {
       var sw = Stopwatch();
 
       sw.start();
-      var params = _PooledIsolateParams(receivePort.sendPort, i, sw);
+      var params = _PooledIsolateParams(receivePort.sendPort, i, sw, initFunc: init);
 
-      var isolate = await Isolate.spawn<_PooledIsolateParams>(
-          _pooledIsolateBody, params,
-          errorsAreFatal: false);
+      final isolate = await Isolate.spawn<_PooledIsolateParams>(
+        _pooledIsolateBody,
+        params,
+        errorsAreFatal: false,
+        debugName: 'pooled_isolate_$i',
+      );
 
       _isolates.add(isolate);
 
@@ -356,14 +361,12 @@ class IsolatePool {
 
   Future _processRequest(_Request request) async {
     if (!_pooledInstances.containsKey(request.instanceId)) {
-      print(
-          'Isolate pool received request to unknown instance ${request.instanceId}');
+      print('Isolate pool received request to unknown instance ${request.instanceId}');
       return;
     }
     var i = _pooledInstances[request.instanceId]!;
     if (i.instance.remoteCallback == null) {
-      print(
-          'Isolate pool received request to instance ${request.instanceId} which doesnt have callback intialized');
+      print('Isolate pool received request to instance ${request.instanceId} which doesnt have callback intialized');
       return;
     }
     try {
@@ -390,16 +393,14 @@ class IsolatePool {
 
       for (var c in creationCompleters.values) {
         if (!c.isCompleted) {
-          c.completeError(
-              'Isolate pool stopped upon request, cancelling instance creation requests');
+          c.completeError('Isolate pool stopped upon request, cancelling instance creation requests');
         }
       }
       creationCompleters.clear();
 
       for (var c in _requestCompleters.values) {
         if (!c.isCompleted) {
-          c.completeError(
-              'Isolate pool stopped upon request, cancelling pending request');
+          c.completeError('Isolate pool stopped upon request, cancelling pending request');
         }
       }
       _requestCompleters.clear();
@@ -412,8 +413,7 @@ class IsolatePool {
   }
 }
 
-void _processResponse(_Response response,
-    [Map<int, Completer>? requestCompleters]) {
+void _processResponse(_Response response, [Map<int, Completer>? requestCompleters]) {
   var cc = requestCompleters ?? _isolateRequestCompleters;
   if (!cc.containsKey(response.requestId)) {
     throw 'Responnse to non-existing request (id ${response.requestId}) recevied';
@@ -430,9 +430,10 @@ void _processResponse(_Response response,
 class _PooledIsolateParams<E> {
   final SendPort sendPort;
   final int isolateIndex;
+  final FutureOr<void> Function()? initFunc;
   final Stopwatch stopwatch;
 
-  _PooledIsolateParams(this.sendPort, this.isolateIndex, this.stopwatch);
+  _PooledIsolateParams(this.sendPort, this.isolateIndex, this.stopwatch, {this.initFunc});
 }
 
 class _PooledJobInternal {
@@ -455,11 +456,9 @@ var _workerInstances = <int, PooledInstance>{};
 
 void _pooledIsolateBody(_PooledIsolateParams params) async {
   params.stopwatch.stop();
-  print(
-      'Isolate #${params.isolateIndex} started (${params.stopwatch.elapsedMicroseconds} microseconds)');
+  print('Isolate #${params.isolateIndex} started (${params.stopwatch.elapsedMicroseconds} microseconds)');
   var isolatePort = ReceivePort();
-  params.sendPort.send(_PooledIsolateParams(
-      isolatePort.sendPort, params.isolateIndex, params.stopwatch));
+  params.sendPort.send(_PooledIsolateParams(isolatePort.sendPort, params.isolateIndex, params.stopwatch));
 
   _reuestIdCounter = 1000000000 *
       (params.isolateIndex +
@@ -468,8 +467,7 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
     if (message is _Request) {
       var req = message;
       if (!_workerInstances.containsKey(req.instanceId)) {
-        print(
-            'Isolate ${params.isolateIndex} received request to unknown instance ${req.instanceId}');
+        print('Isolate ${params.isolateIndex} received request to unknown instance ${req.instanceId}');
         return;
       }
       var i = _workerInstances[req.instanceId]!;
@@ -484,8 +482,7 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
     } else if (message is _Response) {
       var res = message;
       if (!_isolateRequestCompleters.containsKey(res.requestId)) {
-        print(
-            'Isolate ${params.isolateIndex} received response to unknown request ${res.requestId}');
+        print('Isolate ${params.isolateIndex} received response to unknown request ${res.requestId}');
         return;
       }
       _processResponse(res);
@@ -503,8 +500,7 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
       }
     } else if (message is _DestroyRequest) {
       if (!_workerInstances.containsKey(message._instanceId)) {
-        print(
-            'Isolate ${params.isolateIndex} received destroy request of unknown instance ${message._instanceId}');
+        print('Isolate ${params.isolateIndex} received destroy request of unknown instance ${message._instanceId}');
         return;
       }
       _workerInstances.remove(message._instanceId);
@@ -519,8 +515,7 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
         // print('Job done in ${params.stopwatch.elapsedMilliseconds} ms');
         // params.stopwatch.reset();
         // params.stopwatch.start();
-        params.sendPort.send(
-            _PooledJobResult(result, message.jobIndex, message.isolateIndex));
+        params.sendPort.send(_PooledJobResult(result, message.jobIndex, message.isolateIndex));
         // params.stopwatch.stop();
         // print('Job result sent in ${params.stopwatch.elapsedMilliseconds} ms');
       } catch (e) {
@@ -530,6 +525,9 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
       }
     }
   });
+
+  // Call init() after the isolate is started and sendPort is passed back to the main isolate
+  await params.initFunc?.call();
 }
 
 class _IsolateCallbackArg<A> {
@@ -564,9 +562,7 @@ class CallbackIsolate<R, A> {
     job._sendPort = receivePort.sendPort;
     job._errorPort = errorPort.sendPort;
 
-    var isolate = await Isolate.spawn<CallbackIsolateJob<R, A>>(
-        _isolateBody, job,
-        errorsAreFatal: true);
+    var isolate = await Isolate.spawn<CallbackIsolateJob<R, A>>(_isolateBody, job, errorsAreFatal: true);
 
     receivePort.listen((data) {
       if (data is _IsolateCallbackArg) {
