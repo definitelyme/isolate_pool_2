@@ -236,7 +236,7 @@ class IsolatePool {
   /// Throws if:
   /// - [init] is not a `top-level` function or a `static` method.
   /// - invoking init() throws
-  Future start({FutureOr<void> Function()? init}) async {
+  Future start({FutureOr<void> Function()? init, bool errorsAreFatal = false}) async {
     print('Creating a pool of $numberOfIsolates running isolates');
 
     _isolatesStarted = 0;
@@ -262,7 +262,7 @@ class IsolatePool {
       final isolate = await Isolate.spawn<_PooledIsolateParams>(
         _pooledIsolateBody,
         params,
-        errorsAreFatal: false,
+        errorsAreFatal: errorsAreFatal,
         debugName: 'pooled_isolate_$i',
       );
 
