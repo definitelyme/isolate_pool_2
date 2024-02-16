@@ -43,7 +43,7 @@ typedef PooledCallbak<T> = T Function(Action action);
 
 /// Instance of this class is returned from [IsolatePool.createInstance]
 /// and is used to communication with [PooledInstance] via [Action]'s
-class PooledInstanceProxy {
+class PooledInstanceProxy<T> {
   final int _instanceId;
   final IsolatePool _pool;
   PooledInstanceProxy._(this._instanceId, this._pool, this.remoteCallback);
@@ -58,7 +58,7 @@ class PooledInstanceProxy {
   }
 
   /// If not null isolate instance can send actions back to main isolate and this callback will be called
-  PooledCallbak? remoteCallback;
+  PooledCallbak<T>? remoteCallback;
 }
 
 /// Subclass this type in order to define data transfered to isalte pool
@@ -103,8 +103,8 @@ class _DestroyRequest {
 
 enum _PooledInstanceStatus { starting, started }
 
-class _InstanceMapEntry {
-  final PooledInstanceProxy instance;
+class _InstanceMapEntry<T> {
+  final PooledInstanceProxy<T> instance;
   final int isolateIndex;
   _PooledInstanceStatus state = _PooledInstanceStatus.starting;
 
@@ -187,26 +187,27 @@ class IsolatePool {
 
   /// Transfer [PooledInstance] to one of isolates, call it's [PooledInstance.init] method
   /// and make it avaialble for communication via the [PooledInstanceProxy] returned
-  Future<PooledInstanceProxy> addInstance(PooledInstance instance, [PooledCallbak? callbak]) async {
-    var pi = PooledInstanceProxy._(instance._instanceId, this, callbak);
+  Future<PooledInstanceProxy<T>> addInstance<T>(PooledInstance instance, [PooledCallbak<T>? callbak]) async {
+    var pi = PooledInstanceProxy<T>._(instance._instanceId, this, callbak);
 
-    var min = 10000000;
-    var minIndex = 0;
+    var min = 10000000; // max number of instances that can be assigned to a single isolate (theoretically)
+    var minIndex = 0; // index of isolate with the least instances
 
     for (var i = 0; i < numberOfIsolates; i++) {
+      // find the isolate with the fewest instances
       var x = _pooledInstances.entries.where((e) => e.value.isolateIndex == i).fold(0, (int previousValue, _) => previousValue + 1);
       if (x < min) {
-        min = x;
-        minIndex = i;
+        min = x; // sets number of instances in isolate at index [i]
+        minIndex = i; // sets minIndex of isolate at index [i]
       }
     }
 
-    _pooledInstances[pi._instanceId] = _InstanceMapEntry(pi, minIndex);
+    _pooledInstances[pi._instanceId] = _InstanceMapEntry<T>(pi, minIndex);
 
-    var completer = Completer<PooledInstanceProxy>();
+    var completer = Completer<PooledInstanceProxy<T>>();
     creationCompleters[pi._instanceId] = completer;
 
-    _isolateSendPorts[minIndex]!.send(instance);
+    _isolateSendPorts[minIndex]!.send(instance); // send the [PooledInstance] to the isolate
 
     return completer.future;
   }
@@ -301,11 +302,15 @@ class IsolatePool {
     } else {
       var c = creationCompleters[r._instanceId]!;
       if (r.error != null) {
-        c.completeError(r.error);
+        if (!c.isCompleted) {
+          c.completeError(r.error);
+        }
         creationCompleters.remove(r._instanceId);
         _pooledInstances.remove(r._instanceId);
       } else {
-        c.complete(_pooledInstances[r._instanceId]!.instance);
+        if (!c.isCompleted) {
+          c.complete(_pooledInstances[r._instanceId]!.instance);
+        }
         creationCompleters.remove(r._instanceId);
         _pooledInstances[r._instanceId]!.state = _PooledInstanceStatus.started;
       }
@@ -347,11 +352,11 @@ class IsolatePool {
     if (!_pooledInstances.containsKey(instanceId)) {
       throw 'Cant send request to non-existing instance, instanceId $instanceId';
     }
-    var pim = _pooledInstances[instanceId]!;
-    if (pim.state == _PooledInstanceStatus.starting) {
+    var instanceMapEntry = _pooledInstances[instanceId]!;
+    if (instanceMapEntry.state == _PooledInstanceStatus.starting) {
       throw 'Cant send request to instance in Starting state, instanceId $instanceId}';
     }
-    var index = pim.isolateIndex;
+    var index = instanceMapEntry.isolateIndex;
     var request = _Request(instanceId, action);
     _isolateSendPorts[index]!.send(request);
     var c = Completer<R>();
@@ -365,18 +370,21 @@ class IsolatePool {
       return;
     }
     var i = _pooledInstances[request.instanceId]!;
+    final sendPort = _isolateSendPorts[i.isolateIndex];
+
     if (i.instance.remoteCallback == null) {
       print('Isolate pool received request to instance ${request.instanceId} which doesnt have callback intialized');
       return;
     }
+
     try {
       var result = i.instance.remoteCallback!(request.action);
       var response = _Response(request.id, result, null);
 
-      _isolateSendPorts[i.isolateIndex]?.send(response);
+      sendPort?.send(response);
     } catch (e) {
       var response = _Response(request.id, null, e);
-      _isolateSendPorts[i.isolateIndex]?.send(response);
+      sendPort?.send(response);
     }
   }
 
