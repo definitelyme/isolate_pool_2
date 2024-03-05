@@ -133,6 +133,11 @@ class IsolatePool {
   int lastJobStartedIndex = 0; // index of last job started
   final Map<int, Completer> jobCompleters = {}; // index, job completer
 
+  /// Returns a list of send ports of all running isolates
+  ///
+  /// - Can be used to directly send messages to these isolates
+  List<SendPort> get sendPorts => _isolateSendPorts.whereType<SendPort>().toList();
+
   IsolatePoolState _state = IsolatePoolState.notStarted;
 
   IsolatePoolState get state => _state;
