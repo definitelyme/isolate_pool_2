@@ -167,11 +167,11 @@ class IsolatePool {
 
   /// Schedules a job on one of pool's isolates, executes and returns the result. Re-throws expcetion
   /// should the action fail in the executing isolate
-  Future<T> scheduleJob<T>(PooledJob job) {
+  Future<T> scheduleJob<T>(PooledJob<T> job) {
     if (state == IsolatePoolState.stoped) {
       throw 'Isolate pool has been stoped, cant schedule a job';
     }
-    _jobs[lastJobStartedIndex] = _PooledJobInternal(job, lastJobStartedIndex, -1);
+    _jobs[lastJobStartedIndex] = _PooledJobInternal<T>(job, lastJobStartedIndex, -1);
     var completer = Completer<T>();
     jobCompleters[lastJobStartedIndex] = completer;
     lastJobStartedIndex++;
@@ -449,9 +449,9 @@ class _PooledIsolateParams<E> {
   _PooledIsolateParams(this.sendPort, this.isolateIndex, this.stopwatch, {this.initFunc});
 }
 
-class _PooledJobInternal {
+class _PooledJobInternal<T> {
   _PooledJobInternal(this.job, this.jobIndex, this.isolateIndex);
-  final PooledJob job;
+  final PooledJob<T> job;
   final int jobIndex;
   int isolateIndex;
   bool started = false;
