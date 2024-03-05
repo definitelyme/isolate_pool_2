@@ -11,6 +11,9 @@ import 'dart:isolate';
 /// You may reffer to Dart's [SendPort.send] for details on the limitations.
 abstract class PooledJob<E> {
   Future<E> job();
+
+  // ignore: library_private_types_in_public_api
+  _ExternalJob<E> wrap() => _ExternalJob(this);
 }
 
 // Requests have global scope
@@ -457,6 +460,13 @@ class _PooledJobInternal<T> {
   bool started = false;
 }
 
+/// A wrapper used to pass jobs directly from the main isolate to the pool, bypassing the job queue
+final class _ExternalJob<T> {
+  _ExternalJob(this.job);
+
+  final PooledJob<T> job;
+}
+
 class _PooledJobResult {
   _PooledJobResult(this.result, this.jobIndex, this.isolateIndex);
   final dynamic result;
@@ -536,6 +546,8 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
         r.error = e;
         params.sendPort.send(r);
       }
+    } else if (message is _ExternalJob) {
+      await message.job.job();
     }
   });
 
