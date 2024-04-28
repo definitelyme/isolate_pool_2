@@ -49,7 +49,10 @@ typedef PooledCallbak<T> = T Function(Action action);
 class PooledInstanceProxy<T> {
   final int _instanceId;
   final IsolatePool _pool;
-  PooledInstanceProxy._(this._instanceId, this._pool, this.remoteCallback);
+  final SendPort? _sendPort;
+  PooledInstanceProxy._(this._instanceId, this._pool, this.remoteCallback, [this._sendPort]);
+
+  SendPort? get sendPort => _sendPort;
 
   /// Pass [Action] with required params to the remote instance and get result. Re-throws expcetion
   /// should the action fail in the executing isolate
@@ -58,6 +61,10 @@ class PooledInstanceProxy<T> {
       throw 'Isolate pool has been stoped, cant call pooled instnace method';
     }
     return _pool._sendRequest<R>(_instanceId, action);
+  }
+
+  PooledInstanceProxy<T> copyWith({SendPort? sendPort}) {
+    return PooledInstanceProxy._(_instanceId, _pool, remoteCallback, sendPort ?? _sendPort);
   }
 
   /// If not null isolate instance can send actions back to main isolate and this callback will be called
@@ -81,6 +88,12 @@ abstract class PooledInstance {
     _isolateRequestCompleters[request.id] = c;
     return c.future;
   }
+
+  /// The [sendPort] of the isolate where the `PooledInstance` is executed
+  SendPort get sendPort => _sendPort;
+
+  /// The isolate index where the `PooledInstance` will be executed
+  int get isolateId => _instanceId;
 
   /// This method is called in isolate whenever a pool receives a request to create a pooled instance
   Future init();
@@ -210,12 +223,16 @@ class IsolatePool {
       }
     }
 
+    final sendPort = _isolateSendPorts[minIndex];
+
+    pi = pi.copyWith(sendPort: sendPort);
+
     _pooledInstances[pi._instanceId] = _InstanceMapEntry<T>(pi, minIndex);
 
     var completer = Completer<PooledInstanceProxy<T>>();
     creationCompleters[pi._instanceId] = completer;
 
-    _isolateSendPorts[minIndex]!.send(instance); // send the [PooledInstance] to the isolate
+    sendPort!.send(instance); // send the [PooledInstance] to the isolate
 
     return completer.future;
   }
@@ -235,6 +252,12 @@ class IsolatePool {
   double _avgMicroseconds = 0;
   List<ReceivePort> receivePorts = [];
 
+  final Map<String, Stream<dynamic>> _poolReceivePorts = {};
+  final Map<String, SendPort> _poolSendPorts = {};
+
+  Map<String, Stream<dynamic>> get receivePortsMap => _poolReceivePorts;
+  Map<String, SendPort> get sendPortsMap => _poolSendPorts;
+
   /// Starts the pool
   ///
   /// Params:
@@ -245,7 +268,11 @@ class IsolatePool {
   /// Throws if:
   /// - [init] is not a `top-level` function or a `static` method.
   /// - invoking init() throws
-  Future start({FutureOr<void> Function()? init, bool errorsAreFatal = false}) async {
+  Future start({
+    FutureOr<void> Function()? init,
+    bool errorsAreFatal = false,
+    String Function(int)? debugLabel,
+  }) async {
     print('Creating a pool of $numberOfIsolates running isolates');
 
     _isolatesStarted = 0;
@@ -261,18 +288,23 @@ class IsolatePool {
     spawnSw.start();
 
     for (var i = 0; i < numberOfIsolates; i++) {
-      var receivePort = ReceivePort();
-      receivePorts.add(receivePort);
+      final debugName = debugLabel?.call(i) ?? 'pooled_isolate_$i';
+
+      final rp = ReceivePort();
+      final receivePort = rp.asBroadcastStream();
+      receivePorts.add(rp);
+      _poolReceivePorts[debugName] = receivePort;
+      _poolSendPorts[debugName] = rp.sendPort;
       var sw = Stopwatch();
 
       sw.start();
-      var params = _PooledIsolateParams(receivePort.sendPort, i, sw, initFunc: init);
+      var params = _PooledIsolateParams(rp.sendPort, i, sw, initFunc: init);
 
       final isolate = await Isolate.spawn<_PooledIsolateParams>(
         _pooledIsolateBody,
         params,
         errorsAreFatal: errorsAreFatal,
-        debugName: 'pooled_isolate_$i',
+        debugName: debugName,
       );
 
       _isolates.add(isolate);
@@ -425,6 +457,8 @@ class IsolatePool {
       }
     }
 
+    _poolReceivePorts.clear();
+    _poolSendPorts.clear();
     _state = IsolatePoolState.stoped;
   }
 }
