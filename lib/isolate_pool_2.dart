@@ -48,11 +48,15 @@ typedef PooledCallbak<T> = T Function(Action action);
 /// and is used to communication with [PooledInstance] via [Action]'s
 class PooledInstanceProxy<T> {
   final int _instanceId;
+  final int _isolateId;
   final IsolatePool _pool;
   final SendPort? _sendPort;
-  PooledInstanceProxy._(this._instanceId, this._pool, this.remoteCallback, [this._sendPort]);
+  PooledInstanceProxy._(this._instanceId, this._isolateId, this._pool, this.remoteCallback, [this._sendPort]);
 
   SendPort? get sendPort => _sendPort;
+
+  /// The isolate index where the `PooledInstance` will be executed
+  int get isolateId => _isolateId;
 
   /// Pass [Action] with required params to the remote instance and get result. Re-throws expcetion
   /// should the action fail in the executing isolate
@@ -61,10 +65,6 @@ class PooledInstanceProxy<T> {
       throw 'Isolate pool has been stoped, cant call pooled instnace method';
     }
     return _pool._sendRequest<R>(_instanceId, action);
-  }
-
-  PooledInstanceProxy<T> copyWith({SendPort? sendPort}) {
-    return PooledInstanceProxy._(_instanceId, _pool, remoteCallback, sendPort ?? _sendPort);
   }
 
   /// If not null isolate instance can send actions back to main isolate and this callback will be called
@@ -93,7 +93,7 @@ abstract class PooledInstance {
   SendPort get sendPort => _sendPort;
 
   /// The isolate index where the `PooledInstance` will be executed
-  int get isolateId => _instanceId;
+  // int get isolateId => _instanceId;
 
   /// This method is called in isolate whenever a pool receives a request to create a pooled instance
   Future init();
@@ -209,8 +209,6 @@ class IsolatePool {
   /// Transfer [PooledInstance] to one of isolates, call it's [PooledInstance.init] method
   /// and make it avaialble for communication via the [PooledInstanceProxy] returned
   Future<PooledInstanceProxy<T>> addInstance<T>(PooledInstance instance, [PooledCallbak<T>? callbak]) async {
-    var pi = PooledInstanceProxy<T>._(instance._instanceId, this, callbak);
-
     var min = 10000000; // max number of instances that can be assigned to a single isolate (theoretically)
     var minIndex = 0; // index of isolate with the least instances
 
@@ -224,8 +222,7 @@ class IsolatePool {
     }
 
     final sendPort = _isolateSendPorts[minIndex];
-
-    pi = pi.copyWith(sendPort: sendPort);
+    final pi = PooledInstanceProxy<T>._(instance._instanceId, minIndex, this, callbak, sendPort);
 
     _pooledInstances[pi._instanceId] = _InstanceMapEntry<T>(pi, minIndex);
 
