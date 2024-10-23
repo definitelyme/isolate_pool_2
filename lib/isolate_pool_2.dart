@@ -27,6 +27,14 @@ Map<int, Completer> _isolateRequestCompleters = {}; // requestId is key
 /// Action objects are holders of action type and payload/params when calling pooled intances
 abstract class Action {}
 
+enum InitializationPolicy {
+  /// Initialization is done sequentially, one instance at a time
+  sequential,
+
+  /// In concurrent mode all instances are initialized at the same time
+  concurrent;
+}
+
 class _Request {
   final int instanceId;
   final int id;
@@ -141,7 +149,7 @@ enum IsolatePoolState { notStarted, started, stoped }
 class IsolatePool {
   final int numberOfIsolates;
   final List<SendPort?> _isolateSendPorts = [];
-  final List<Isolate> _isolates = [];
+  final Map<int, Isolate> _isolates = {};
 
   // Job specific fields
   final List<bool> _isolateBusyWithJob = [];
@@ -261,6 +269,11 @@ class IsolatePool {
   ///
   /// - [init] - A function to be called on each isolate before it starts processing requests. You can use it to initialize
   ///  isolate's state, (e.g. load data from file, connect to database, etc).
+  /// - [errorsAreFatal] - If set to true, any error thrown in this isolate with be thrown in the `main` isolate
+  /// - [debugLabel] - A function that returns a string label for each isolate, useful for debugging
+  /// - [initializationPolicy] - Determines how isolates are initialized.
+  ///   - In `sequential` mode isolates are initialized one after another. There is almost zero collision risk from the [init] function.
+  ///   - In `concurrent` mode all isolates are initialized at the same time.
   ///
   /// Throws if:
   /// - [init] is not a `top-level` function or a `static` method.
@@ -269,6 +282,7 @@ class IsolatePool {
     FutureOr<void> Function()? init,
     bool errorsAreFatal = false,
     String Function(int)? debugLabel,
+    InitializationPolicy initializationPolicy = InitializationPolicy.concurrent,
   }) async {
     print('Creating a pool of $numberOfIsolates running isolates');
 
@@ -276,37 +290,46 @@ class IsolatePool {
     _avgMicroseconds = 0;
 
     var last = Completer();
+    final futures = <int, Future<Isolate>>{};
+    final stopWatches = <int, Stopwatch>{};
+
     for (var i = 0; i < numberOfIsolates; i++) {
       _isolateBusyWithJob.add(false);
       _isolateSendPorts.add(null);
-    }
 
-    var spawnSw = Stopwatch();
-    spawnSw.start();
-
-    for (var i = 0; i < numberOfIsolates; i++) {
       final debugName = debugLabel?.call(i) ?? 'pooled_isolate_$i';
 
       final rp = ReceivePort();
+
       final receivePort = rp.asBroadcastStream();
-      receivePorts.add(rp);
+
       _poolReceivePorts[debugName] = receivePort;
       _poolSendPorts[debugName] = rp.sendPort;
-      var sw = Stopwatch();
 
-      sw.start();
-      var params = _PooledIsolateParams(rp.sendPort, i, sw, initFunc: init);
+      receivePorts.add(rp);
 
-      final isolate = await Isolate.spawn<_PooledIsolateParams>(
-        _pooledIsolateBody,
-        params,
-        errorsAreFatal: errorsAreFatal,
-        debugName: debugName,
+      final sw = Stopwatch();
+
+      if (initializationPolicy == InitializationPolicy.concurrent) {
+        sw.start();
+      } else {
+        stopWatches.putIfAbsent(i, () => sw);
+      }
+
+      final params = _PooledIsolateParams(rp.sendPort, i, sw, initFunc: init, policy: initializationPolicy);
+
+      futures.putIfAbsent(
+        i,
+        () => Isolate.spawn<_PooledIsolateParams>(
+          _pooledIsolateBody,
+          params,
+          errorsAreFatal: errorsAreFatal,
+          debugName: debugName,
+          paused: initializationPolicy == InitializationPolicy.sequential,
+        ),
       );
 
-      _isolates.add(isolate);
-
-      receivePort.listen((data) {
+      receivePort.listen((data) async {
         if (_state == IsolatePoolState.stoped) {
           print('Received isolate message when pool is already stopped');
           return;
@@ -319,16 +342,50 @@ class IsolatePool {
           _processResponse(data, _requestCompleters);
         } else if (data is _PooledIsolateParams) {
           _processIsolateStartResult(data, last);
+
+          if (initializationPolicy == InitializationPolicy.sequential) {
+            final thisIsolateIndex = data.isolateIndex;
+            final nextIsolateIndex = data.nextIsolateIndex;
+            final thisIsolateSw = stopWatches[thisIsolateIndex];
+
+            thisIsolateSw?.stop();
+
+            print('[isolate_pool_2]: Isolate #$thisIsolateIndex initialized, '
+                'took (${thisIsolateSw?.elapsedMilliseconds} milliseconds)');
+
+            if (nextIsolateIndex == null) return;
+
+            if (nextIsolateIndex == thisIsolateIndex + 1 && nextIsolateIndex < numberOfIsolates) {
+              final nextIsolate = _isolates[nextIsolateIndex];
+              if (nextIsolate?.pauseCapability != null) {
+                stopWatches[nextIsolateIndex]?.start();
+                nextIsolate?.resume(nextIsolate.pauseCapability!);
+              }
+            }
+          }
         } else if (data is _PooledJobResult) {
           _processJobResult(data);
         }
       });
     }
 
+    final spawnSw = Stopwatch()..start();
+
+    for (final entry in futures.entries) {
+      final isolate = await entry.value;
+
+      _isolates.putIfAbsent(entry.key, () => isolate);
+
+      /// resume only the first isolate here
+      if (entry.key == 0 && isolate.pauseCapability != null && initializationPolicy == InitializationPolicy.sequential) {
+        stopWatches[entry.key]?.start();
+        isolate.resume(isolate.pauseCapability!);
+      }
+    }
+
     spawnSw.stop();
 
-    print('spawn() called on $numberOfIsolates isolates'
-        '(${spawnSw.elapsedMicroseconds} microseconds)');
+    print('spawn() called on $numberOfIsolates isolates (${spawnSw.elapsedMicroseconds} microseconds)');
 
     return last.future;
   }
@@ -427,7 +484,7 @@ class IsolatePool {
 
   /// Throws if there're pending jobs or requests
   void stop() {
-    for (var i in _isolates) {
+    for (var i in _isolates.values) {
       i.kill();
       for (var c in jobCompleters.values) {
         if (!c.isCompleted) {
@@ -479,8 +536,17 @@ class _PooledIsolateParams<E> {
   final int isolateIndex;
   final FutureOr<void> Function()? initFunc;
   final Stopwatch stopwatch;
+  final int? nextIsolateIndex;
+  final InitializationPolicy? policy;
 
-  _PooledIsolateParams(this.sendPort, this.isolateIndex, this.stopwatch, {this.initFunc});
+  _PooledIsolateParams(
+    this.sendPort,
+    this.isolateIndex,
+    this.stopwatch, {
+    this.initFunc,
+    this.nextIsolateIndex,
+    this.policy,
+  });
 }
 
 class _PooledJobInternal<T> {
@@ -509,14 +575,11 @@ class _PooledJobResult {
 var _workerInstances = <int, PooledInstance>{};
 
 void _pooledIsolateBody(_PooledIsolateParams params) async {
-  params.stopwatch.stop();
-  print('Isolate #${params.isolateIndex} started (${params.stopwatch.elapsedMicroseconds} microseconds)');
-  var isolatePort = ReceivePort();
-  params.sendPort.send(_PooledIsolateParams(isolatePort.sendPort, params.isolateIndex, params.stopwatch));
+  final isolatePort = ReceivePort();
 
-  _reuestIdCounter = 1000000000 *
-      (params.isolateIndex +
-          1); // split counters into ranges to deal with overlaps between isolates. Theoretically after one billion requests a collision might happen
+  // split counters into ranges to deal with overlaps between isolates. Theoretically after one billion requests a collision might happen
+  _reuestIdCounter = 1000000000 * (params.isolateIndex + 1);
+
   isolatePort.listen((message) async {
     if (message is _Request) {
       var req = message;
@@ -584,6 +647,19 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
 
   // Call init() after the isolate is started and sendPort is passed back to the main isolate
   await params.initFunc?.call();
+
+  params.stopwatch.stop();
+
+  params.sendPort.send(_PooledIsolateParams(
+    isolatePort.sendPort,
+    params.isolateIndex,
+    params.stopwatch,
+    nextIsolateIndex: params.isolateIndex + 1,
+  ));
+
+  if (params.policy == InitializationPolicy.concurrent) {
+    print('[isolate_pool_2]: Isolate #${params.isolateIndex} initialized, took (${params.stopwatch.elapsedMilliseconds} milliseconds)');
+  }
 }
 
 class _IsolateCallbackArg<A> {
