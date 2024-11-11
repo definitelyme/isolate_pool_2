@@ -390,10 +390,8 @@ class IsolatePool {
 
             if (nextIsolateIndex == thisIsolateIndex + 1 && nextIsolateIndex < numberOfIsolates) {
               final nextIsolate = _isolates[nextIsolateIndex];
-              if (nextIsolate?.pauseCapability != null) {
-                stopWatches[nextIsolateIndex]?.start();
-                nextIsolate?.resume(nextIsolate.pauseCapability!);
-              }
+              stopWatches[nextIsolateIndex]?.start();
+              nextIsolate?.resume(nextIsolate.pauseCapability!);
             }
           }
         } else if (data is _PooledJobResult) {
@@ -410,7 +408,7 @@ class IsolatePool {
       _isolates.putIfAbsent(entry.key, () => isolate);
 
       /// resume only the first isolate here
-      if (entry.key == 0 && isolate.pauseCapability != null && initializationPolicy == InitializationPolicy.sequential) {
+      if (entry.key == 0 && initializationPolicy == InitializationPolicy.sequential) {
         stopWatches[entry.key]?.start();
         isolate.resume(isolate.pauseCapability!);
       }
