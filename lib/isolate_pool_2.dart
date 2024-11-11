@@ -10,6 +10,8 @@ import 'dart:isolate';
 /// have challenges with objects that wrap native resources (e.g. fil handles).
 /// You may reffer to Dart's [SendPort.send] for details on the limitations.
 abstract class PooledJob<E> {
+  const PooledJob();
+
   Future<E> job();
 
   // ignore: library_private_types_in_public_api
@@ -25,7 +27,7 @@ Map<int, Completer> _isolateRequestCompleters = {}; // requestId is key
 
 class IsolatePoolBaseException implements Exception {
   final String message;
-  IsolatePoolBaseException(this.message);
+  const IsolatePoolBaseException(this.message);
 
   @override
   String toString() => message;
@@ -35,23 +37,23 @@ class IsolatePoolBaseException implements Exception {
 // Note: completers' error can be an `IsolatePoolJobsCancelled` now instead of String.
 // To easily migrate `catch (e)` blocks that expect a string, use `e.toString()` for the same error string as before
 class NoSuchIsolateInstance extends IsolatePoolBaseException {
-  NoSuchIsolateInstance(super.message);
+  const NoSuchIsolateInstance(super.message);
 }
 
 class IsolatePoolStopped extends IsolatePoolBaseException {
-  IsolatePoolStopped(super.message);
+  const IsolatePoolStopped(super.message);
 }
 
 class IsolatePoolJobCancelled extends IsolatePoolBaseException {
-  IsolatePoolJobCancelled(super.message);
+  const IsolatePoolJobCancelled(super.message);
 }
 
 class IsolateNotYetStarted extends IsolatePoolBaseException {
-  IsolateNotYetStarted(super.message);
+  const IsolateNotYetStarted(super.message);
 }
 
 class BadResponseReceivedError extends IsolatePoolBaseException {
-  BadResponseReceivedError(super.message);
+  const BadResponseReceivedError(super.message);
 }
 
 /// Inherti when using pooled instances and defining actions.
