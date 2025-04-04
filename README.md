@@ -90,6 +90,8 @@ class MyAction extends Action {
 }
 ```
 
+#### PooledInstance Architecture Overview
+
 ```dart
                                                            │
                         Main isolate                       │  Isolate in the pool
