@@ -243,7 +243,9 @@ class IsolatePool {
   /// was caught in the main isolate.
   ///
   /// Throws [IsolatePoolStoppedException] if the pool has been stopped.
-  Future<T> scheduleJob<T>(PooledJob<T> job, [int isolateIndex = -1]) {
+  Future<T> scheduleJob<T>(PooledJob<T> job, [int? isolateIndex]) {
+    isolateIndex ??= -1;
+
     if (state == IsolatePoolState.stopped) {
       throw IsolatePoolStoppedException('Isolate pool has been stopped, cannot schedule a job');
     }
@@ -264,32 +266,57 @@ class IsolatePool {
   /// Parameters:
   /// - [instance]: The instance to create
   /// - [callback]: Optional callback function for the instance to call back to the main isolate
+  /// - [isolateIndex]: Optional index of the isolate to create the instance in (defaults to -1,
+  ///   which means the instance will be created in the isolate with the fewest instances)
   ///
   /// Returns a [Future] that completes with a proxy to the instance.
-  Future<PooledInstanceProxy<T>> addInstance<T>(PooledInstance instance, [PooledCallback<T>? callback]) async {
-    var min = 10000000; // max number of instances that can be assigned to a single isolate
-    var minIndex = 0; // index of isolate with the least instances
+  Future<PooledInstanceProxy<T>> addInstance<T>(
+    PooledInstance instance, {
+    PooledCallback<T>? callback,
+    int? isolateIndex,
+  }) async {
+    isolateIndex ??= -1;
 
-    // Find the isolate with the fewest instances
-    for (var i = 0; i < numberOfIsolates; i++) {
-      final instanceCount = _pooledInstances.entries.where((e) => e.value.isolateIndex == i).fold(0, (int prev, _) => prev + 1);
-
-      if (instanceCount < min) {
-        min = instanceCount;
-        minIndex = i;
-      }
+    if (state == IsolatePoolState.stopped) {
+      throw IsolatePoolStoppedException('Isolate pool has been stopped, cannot add an instance');
     }
 
-    final sendPort = sendPorts[minIndex];
+    // If a specific isolate is requested and it's valid, use it
+    int targetIsolateIndex;
+    if (isolateIndex >= 0 && isolateIndex < numberOfIsolates) {
+      targetIsolateIndex = isolateIndex;
+    } else if (isolateIndex >= numberOfIsolates) {
+      throw IsolatePoolException(
+        "Invalid isolate index $isolateIndex (only $numberOfIsolates isolates available). Valid indices are 0...${numberOfIsolates - 1}.",
+      );
+    } else {
+      // Otherwise find the isolate with the fewest instances
+      var min = 10000000; // max number of instances that can be assigned to a single isolate
+      var minIndex = 0; // index of isolate with the least instances
+
+      // Find the isolate with the fewest instances
+      for (var i = 0; i < numberOfIsolates; i++) {
+        final instanceCount = _pooledInstances.entries.where((e) => e.value.isolateIndex == i).fold(0, (int prev, _) => prev + 1);
+
+        if (instanceCount < min) {
+          min = instanceCount;
+          minIndex = i;
+        }
+      }
+
+      targetIsolateIndex = minIndex;
+    }
+
+    final sendPort = sendPorts[targetIsolateIndex];
     final proxy = PooledInstanceProxy(
       instanceId: instance.instanceId,
-      isolateId: minIndex,
+      isolateId: targetIsolateIndex,
       pool: this,
       remoteCallback: callback,
       sendPort: sendPort,
     );
 
-    _pooledInstances[proxy.instanceId] = InstanceMapEntry<T>(proxy, minIndex);
+    _pooledInstances[proxy.instanceId] = InstanceMapEntry<T>(proxy, targetIsolateIndex);
 
     final completer = Completer<PooledInstanceProxy<T>>();
     _creationCompleters[proxy.instanceId] = completer;

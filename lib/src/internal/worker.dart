@@ -51,12 +51,13 @@ void pooledIsolateBody(PooledIsolateParams params) async {
   isolatePort.listen((message) async {
     if (message is Request) {
       if (!workerInstances.containsKey(message.instanceId)) {
-        final errorMsg = 'Isolate ${params.isolateIndex} received request for unknown instance ${message.instanceId}';
-        // print(errorMsg);
+        final errorMsg = 'Isolate [${params.isolateIndex}] received request for unknown instance ${message.instanceId}';
+        print(errorMsg);
 
         final error = NoSuchIsolateInstanceException(errorMsg);
         final response = Response(message.id, null, error, StackTrace.current, params.isolateIndex);
         params.sendPort.send(response);
+        params.errorSendPort?.send(error);
         return;
       }
 

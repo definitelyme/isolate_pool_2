@@ -13,8 +13,21 @@ extension IsolatePoolExtensions on IsolatePool {
   /// This method sends an action to a specific instance in the pool and returns
   /// a future that completes with the result of the action.
   ///
-  /// Throws an exception if the instance does not exist or is not yet started.
-  Future<R> sendRequest<R>(int instanceId, Action action) {
+  /// Parameters:
+  /// - [instanceId]: The ID of the instance to send the request to
+  /// - [action]: The action to send to the instance
+  /// - [isolateIndex]: Optional index of the isolate to execute the action on.
+  ///   If specified, this overrides the isolate where the instance was created.
+  ///   If not specified or negative, the instance's original isolate is used.
+  ///
+  /// Throws exceptions if:
+  /// - The instance does not exist
+  /// - The instance is not yet started
+  /// - The pool has been stopped
+  /// - The specified isolate index is invalid
+  Future<R> sendRequest<R>(int instanceId, Action action, [int? isolateIndex]) {
+    isolateIndex ??= -1;
+
     if (state == IsolatePoolState.stopped) {
       throw IsolatePoolStoppedException('Isolate pool has been stopped, cannot send request');
     }
@@ -29,10 +42,21 @@ extension IsolatePoolExtensions on IsolatePool {
       throw IsolateNotYetStartedException('Cannot send request to instance in Starting state, instanceId $instanceId');
     }
 
-    final index = instance.isolateIndex;
+    // Use the specified isolate index if provided, otherwise use the instance's original isolate
+    final targetIsolate = (isolateIndex >= 0) ? isolateIndex : instance.isolateIndex;
+
+    // Validate the isolate index
+    if (targetIsolate > sendPorts.length - 1) {
+      throw IsolatePoolException(
+        "Invalid isolate index $targetIsolate (only ${sendPorts.length} isolates available). Valid indices are 0...${sendPorts.length - 1}",
+      );
+    }
+
     final request = Request(instanceId, action);
 
-    sendPorts[index].send(request);
+    print('[Sending PooledInstanceRequest to isolate $targetIsolate]');
+
+    sendPorts[targetIsolate].send(request);
 
     final completer = Completer<R>();
     requestCompleters[request.id] = completer;
