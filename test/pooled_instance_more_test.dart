@@ -1,9 +1,10 @@
 @TestOn('vm')
 library;
 
+import 'dart:async';
+
 import 'package:isolate_pool_2/isolate_pool_2.dart';
 import 'package:test/test.dart';
-import 'dart:async';
 
 class InstanceA {
   int sum(int x, int y) {
@@ -133,7 +134,7 @@ void main() {
   test('Creating pooled instance succeeds', () async {
     var pool = IsolatePool(4);
     await pool.start();
-    await pool.addInstance(WorkerA(), null);
+    await pool.addInstance(WorkerA());
     expect(pool.numberOfPooledInstances, 1);
   });
 
@@ -141,7 +142,7 @@ void main() {
     var pool = IsolatePool(4);
     await pool.start();
     for (var i = 0; i < 20; i++) {
-      await pool.addInstance(WorkerA(), null);
+      await pool.addInstance(WorkerA());
     }
     expect(pool.numberOfPooledInstances, 20);
   });
@@ -150,7 +151,7 @@ void main() {
     var pool = IsolatePool(4);
     await pool.start();
     for (var i = 0; i < 20; i++) {
-      await pool.addInstance(i % 2 == 0 ? WorkerA() : WorkerB(), null);
+      await pool.addInstance(i % 2 == 0 ? WorkerA() : WorkerB());
     }
     expect(pool.numberOfPooledInstances, 20);
   });
@@ -160,7 +161,7 @@ void main() {
     await pool.start();
     var instances = <PooledInstanceProxy>[];
     for (var i = 0; i < 20; i++) {
-      var pi = await pool.addInstance(i % 2 == 0 ? WorkerA() : WorkerB(), null);
+      var pi = await pool.addInstance(i % 2 == 0 ? WorkerA() : WorkerB());
       instances.add(pi);
     }
     expect(pool.numberOfPooledInstances, 20);
@@ -181,7 +182,7 @@ void main() {
     await pool.start();
     var instances = <PooledInstanceProxy>[];
     for (var i = 0; i < 5; i++) {
-      var pi = await pool.addInstance(WorkerA(), null);
+      var pi = await pool.addInstance(WorkerA());
       instances.add(pi);
     }
     expect(pool.numberOfPooledInstances, 5);
@@ -195,7 +196,7 @@ void main() {
   test('Calling method with pool stopped is handled', () async {
     var pool = IsolatePool(4);
     await pool.start();
-    var pi = await pool.addInstance(WorkerA(), null);
+    var pi = await pool.addInstance(WorkerA());
     expect(pool.numberOfPooledInstances, 1);
     pool.stop();
     expect(() async => await pi.callRemoteMethod(SumIntAction(1, 1)), throwsA(isA<IsolatePoolStoppedException>()));
@@ -210,7 +211,7 @@ void main() {
 
     try {
       for (var i = 0; i < 25; i++) {
-        f = pool.addInstance(WorkerA(), null);
+        f = pool.addInstance(WorkerA());
         if (i < 24) await f;
       }
       //expect(_pool.numberOfPooledInstances, 0);
@@ -234,7 +235,7 @@ void main() {
 
     try {
       for (var i = 0; i < 25; i++) {
-        pi = await pool.addInstance(WorkerA(), null);
+        pi = await pool.addInstance(WorkerA());
       }
 
       expect(pool.numberOfPooledInstances, 25);
@@ -258,7 +259,7 @@ void main() {
     await pool.start();
     var s = '';
     try {
-      await pool.addInstance(WorkerA(true), null);
+      await pool.addInstance(WorkerA(true));
     } catch (e) {
       s = e.toString();
     }
@@ -283,7 +284,7 @@ void main() {
 
     test('Call callback from pooled instance', () async {
       var completer = Completer<int>();
-      var pi = await gPool.addInstance(WorkerA(), (a) {
+      var pi = await gPool.addInstance(WorkerA(), callback: (a) {
         completer.complete((a as CallbackAction).x);
         return a.x + 1;
       });
