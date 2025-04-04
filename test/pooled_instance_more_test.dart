@@ -168,7 +168,7 @@ void main() {
     var pools = List<int>.filled(4, 0);
 
     for (var pi in instances) {
-      pools[pool.indexOfPi(pi)]++;
+      pools[pool.indexOfInstance(pi)]++;
     }
 
     for (var p in pools) {
@@ -189,10 +189,7 @@ void main() {
     pool.destroyInstance(instances[0]);
     expect(pool.numberOfPooledInstances, 4);
 
-    expect(
-      () => pool.destroyInstance(instances[0]),
-      throwsA(isA<NoSuchIsolateInstance>())
-    );
+    expect(() => pool.destroyInstance(instances[0]), throwsA(isA<NoSuchIsolateInstanceException>()));
   });
 
   test('Calling method with pool stopped is handled', () async {
@@ -201,10 +198,7 @@ void main() {
     var pi = await pool.addInstance(WorkerA(), null);
     expect(pool.numberOfPooledInstances, 1);
     pool.stop();
-    expect(
-      () async => await pi.callRemoteMethod(SumIntAction(1, 1)),
-      throwsA(isA<IsolatePoolStopped>())
-    );
+    expect(() async => await pi.callRemoteMethod(SumIntAction(1, 1)), throwsA(isA<IsolatePoolStoppedException>()));
   });
 
   test('Can stop while there\'re instances being created', () async {
@@ -227,8 +221,7 @@ void main() {
       err = e.toString();
     }
 
-    expect(err,
-        'Isolate pool stopped upon request, cancelling instance creation requests');
+    expect(err, 'Isolate pool stopped upon request, cancelling instance creation requests');
   });
 
   test('Can stop while there\'re requests pending', () async {
@@ -257,8 +250,7 @@ void main() {
       err = e.toString();
     }
 
-    expect(
-        err, 'Isolate pool stopped upon request, cancelling pending request');
+    expect(err, 'Isolate pool stopped upon request, cancelling pending request');
   });
 
   test('Creating pooled instance with error', () async {
@@ -376,9 +368,7 @@ void main() {
       expect(s, 'Unknown action recevied');
     });
 
-    test(
-        'Calling action with unexpected params when wroker is supposed to throw',
-        () async {
+    test('Calling action with unexpected params when wroker is supposed to throw', () async {
       var s = '';
       try {
         await pib.callRemoteMethod<int>(SumDynamicAction('', ''));

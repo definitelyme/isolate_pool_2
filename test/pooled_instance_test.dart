@@ -67,8 +67,7 @@ void main() {
 
     expect(r[0], 'Hello');
 
-    expect(px.callRemoteMethod(UnknownAction()),
-        throwsA("Unknown action UnknownAction"));
+    expect(px.callRemoteMethod(UnknownAction()), throwsA("Unknown action UnknownAction"));
   });
 
   test('Pooled isnatce can be destroyed', () async {
@@ -82,8 +81,6 @@ void main() {
 
     p.destroyInstance(px);
 
-    expect(
-        () => px.callRemoteMethod(GetValues()),
-        throwsA(isA<NoSuchIsolateInstance>()));
+    expect(() => px.callRemoteMethod(GetValues()), throwsA(isA<NoSuchIsolateInstanceException>()));
   });
 }

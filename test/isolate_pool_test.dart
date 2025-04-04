@@ -107,7 +107,7 @@ void main() {
       expect(p.state, IsolatePoolState.started);
       //For no better option to check that isolates a actually killed it's worth seting a breakpoint here and then cheking in Debug/Call Stack (VSCode) that before stop() there're running isolates and they disappear after stop()
       p.stop();
-      expect(p.state, IsolatePoolState.stoped);
+      expect(p.state, IsolatePoolState.stopped);
     }, timeout: Timeout(Duration(seconds: 5)));
 
     test('Awaiting "start" completer', () async {
@@ -155,9 +155,7 @@ void main() {
       expect(await futures[1], 4);
     });
 
-    test(
-        'Nothing horrible happens if pool is killed while there\'re running jobs',
-        () async {
+    test('Nothing horrible happens if pool is killed while there\'re running jobs', () async {
       var p = IsolatePool(4);
       await p.start();
 
@@ -171,7 +169,7 @@ void main() {
       try {
         p.stop();
         print(await Future.wait(futures));
-      } on IsolatePoolJobCancelled catch (e) {
+      } on IsolatePoolJobCancelledException catch (e) {
         if (e.toString() == 'Isolate pool stopped upon request, cancelling jobs') {
           thrown = true;
         }
