@@ -1,4 +1,4 @@
-library isolate_pool;
+library;
 
 import 'dart:async';
 import 'dart:isolate';
@@ -151,7 +151,7 @@ enum IsolatePoolState { notStarted, started, stoped }
 /// number of calls.
 class IsolatePool {
   final int numberOfIsolates;
-  final List<SendPort?> _isolateSendPorts = [];
+  final List<SendPort?> _mainToWorkerSendPorts = [];
   final Map<int, Isolate> _isolates = {};
 
   // Job specific fields
@@ -163,7 +163,7 @@ class IsolatePool {
   /// Returns a list of send ports of all running isolates
   ///
   /// - Can be used to directly send messages to these isolates
-  List<SendPort> get sendPorts => _isolateSendPorts.whereType<SendPort>().toList();
+  List<SendPort> get sendPorts => _mainToWorkerSendPorts.whereType<SendPort>().toList();
 
   IsolatePoolState _state = IsolatePoolState.notStarted;
 
@@ -213,7 +213,7 @@ class IsolatePool {
       throw 'Cant find instance with id ${instance._instanceId} among active to destroy it';
     }
 
-    _isolateSendPorts[index]!.send(_DestroyRequest(instance._instanceId));
+    _mainToWorkerSendPorts[index]!.send(_DestroyRequest(instance._instanceId));
     _pooledInstances.remove(instance._instanceId);
   }
 
@@ -232,7 +232,7 @@ class IsolatePool {
       }
     }
 
-    final sendPort = _isolateSendPorts[minIndex];
+    final sendPort = _mainToWorkerSendPorts[minIndex];
     final pi = PooledInstanceProxy<T>._(instance._instanceId, minIndex, this, callbak, sendPort);
 
     _pooledInstances[pi._instanceId] = _InstanceMapEntry<T>(pi, minIndex);
@@ -251,7 +251,7 @@ class IsolatePool {
       var job = _jobs.entries.where((j) => j.value.started == false).first.value;
       job.isolateIndex = availableIsolate;
       job.started = true;
-      _isolateSendPorts[availableIsolate]!.send(job);
+      _mainToWorkerSendPorts[availableIsolate]!.send(job);
       _isolateBusyWithJob[availableIsolate] = true;
     }
   }
@@ -260,11 +260,17 @@ class IsolatePool {
   double _avgMicroseconds = 0;
   List<ReceivePort> receivePorts = [];
 
-  final Map<String, Stream<dynamic>> _poolReceivePorts = {};
-  final Map<String, SendPort> _poolSendPorts = {};
+  final Map<String, Stream<dynamic>> _mainReceivePorts = {};
+  final Map<String, SendPort> _workerToMainSendPorts = {};
 
-  Map<String, Stream<dynamic>> get receivePortsMap => _poolReceivePorts;
-  Map<String, SendPort> get sendPortsMap => _poolSendPorts;
+  /// Get map of receive ports in the main isolate
+  Map<String, Stream<dynamic>> get mainReceivePorts => _mainReceivePorts;
+
+  /// Get map of send ports from worker isolates back to main isolate
+  Map<String, SendPort> get workerToMainSendPorts => _workerToMainSendPorts;
+
+  /// Get map of send ports from main isolate to worker isolates
+  List<SendPort?> get mainToWorkerSendPorts => _mainToWorkerSendPorts;
 
   /// Starts the pool
   ///
@@ -298,7 +304,7 @@ class IsolatePool {
 
     for (var i = 0; i < numberOfIsolates; i++) {
       _isolateBusyWithJob.add(false);
-      _isolateSendPorts.add(null);
+      _mainToWorkerSendPorts.add(null);
 
       final debugName = debugLabel?.call(i) ?? 'pooled_isolate_$i';
 
@@ -306,8 +312,8 @@ class IsolatePool {
 
       final receivePort = rp.asBroadcastStream();
 
-      _poolReceivePorts[debugName] = receivePort;
-      _poolSendPorts[debugName] = rp.sendPort;
+      _mainReceivePorts[debugName] = receivePort;
+      _workerToMainSendPorts[debugName] = rp.sendPort;
 
       receivePorts.add(rp);
 
@@ -416,7 +422,7 @@ class IsolatePool {
 
   void _processIsolateStartResult(_PooledIsolateParams params, Completer last) {
     _isolatesStarted++;
-    _isolateSendPorts[params.isolateIndex] = params.sendPort;
+    _mainToWorkerSendPorts[params.isolateIndex] = params.sendPort;
     _avgMicroseconds += params.stopwatch.elapsedMicroseconds;
     if (_isolatesStarted == numberOfIsolates) {
       _avgMicroseconds /= numberOfIsolates;
@@ -455,7 +461,7 @@ class IsolatePool {
     }
     var index = instanceMapEntry.isolateIndex;
     var request = _Request(instanceId, action);
-    _isolateSendPorts[index]!.send(request);
+    _mainToWorkerSendPorts[index]!.send(request);
     var c = Completer<R>();
     _requestCompleters[request.id] = c;
     return c.future;
@@ -467,7 +473,7 @@ class IsolatePool {
       return;
     }
     var i = _pooledInstances[request.instanceId]!;
-    final sendPort = _isolateSendPorts[i.isolateIndex];
+    final sendPort = _mainToWorkerSendPorts[i.isolateIndex];
 
     if (i.instance.remoteCallback == null) {
       print('Isolate pool received request to instance ${request.instanceId} which doesnt have callback intialized');
@@ -514,8 +520,9 @@ class IsolatePool {
       }
     }
 
-    _poolReceivePorts.clear();
-    _poolSendPorts.clear();
+    _mainReceivePorts.clear();
+    _workerToMainSendPorts.clear();
+    _mainToWorkerSendPorts.clear();
     _state = IsolatePoolState.stoped;
   }
 }
