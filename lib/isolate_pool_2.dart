@@ -100,6 +100,9 @@ abstract class PooledInstance {
   /// The [sendPort] of the isolate where the `PooledInstance` is executed
   SendPort get sendPort => _sendPort;
 
+  /// The isolate id of the `PooledInstance`
+  int get instanceId => _instanceId;
+
   /// The isolate index where the `PooledInstance` will be executed
   // int get isolateId => _instanceId;
 
