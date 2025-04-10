@@ -363,7 +363,7 @@ class IsolatePool {
               }
             }
           }
-        } else if (data is _PooledJobResult) {
+        } else if (data is PooledJobResult) {
           _processJobResult(data);
         }
       });
@@ -425,7 +425,7 @@ class IsolatePool {
     }
   }
 
-  void _processJobResult(_PooledJobResult result) {
+  void _processJobResult(PooledJobResult result) {
     _isolateBusyWithJob[result.isolateIndex] = false;
     assert(jobCompleters.containsKey(result.jobIndex));
 
@@ -564,8 +564,8 @@ final class _ExternalJob<T> {
   final PooledJob<T> job;
 }
 
-class _PooledJobResult {
-  _PooledJobResult(this.result, this.jobIndex, this.isolateIndex);
+class PooledJobResult {
+  PooledJobResult(this.result, this.jobIndex, this.isolateIndex);
   final dynamic result;
   final int jobIndex;
   final int isolateIndex;
@@ -632,11 +632,11 @@ void _pooledIsolateBody(_PooledIsolateParams params) async {
         // print('Job done in ${params.stopwatch.elapsedMilliseconds} ms');
         // params.stopwatch.reset();
         // params.stopwatch.start();
-        params.sendPort.send(_PooledJobResult(result, message.jobIndex, message.isolateIndex));
+        params.sendPort.send(PooledJobResult(result, message.jobIndex, message.isolateIndex));
         // params.stopwatch.stop();
         // print('Job result sent in ${params.stopwatch.elapsedMilliseconds} ms');
       } catch (e) {
-        var r = _PooledJobResult(null, message.jobIndex, message.isolateIndex);
+        var r = PooledJobResult(null, message.jobIndex, message.isolateIndex);
         r.error = e;
         params.sendPort.send(r);
       }
