@@ -151,7 +151,7 @@ enum IsolatePoolState { notStarted, started, stoped }
 /// number of calls.
 class IsolatePool {
   final int numberOfIsolates;
-  final List<SendPort?> _mainToWorkerSendPorts = [];
+  final Map<int, SendPort?> _mainToWorkerSendPorts = {};
   final Map<int, Isolate> _isolates = {};
 
   // Job specific fields
@@ -163,7 +163,7 @@ class IsolatePool {
   /// Returns a list of send ports of all running isolates
   ///
   /// - Can be used to directly send messages to these isolates
-  List<SendPort> get sendPorts => _mainToWorkerSendPorts.whereType<SendPort>().toList();
+  List<SendPort> get sendPorts => _mainToWorkerSendPorts.values.whereType<SendPort>().toList();
 
   IsolatePoolState _state = IsolatePoolState.notStarted;
 
@@ -270,7 +270,7 @@ class IsolatePool {
   Map<String, SendPort> get workerToMainSendPorts => _workerToMainSendPorts;
 
   /// Get map of send ports from main isolate to worker isolates
-  List<SendPort?> get mainToWorkerSendPorts => _mainToWorkerSendPorts;
+  Map<int, SendPort?> get mainToWorkerSendPorts => _mainToWorkerSendPorts;
 
   /// Starts the pool
   ///
@@ -304,7 +304,7 @@ class IsolatePool {
 
     for (var i = 0; i < numberOfIsolates; i++) {
       _isolateBusyWithJob.add(false);
-      _mainToWorkerSendPorts.add(null);
+      _mainToWorkerSendPorts[i] = null;
 
       final debugName = debugLabel?.call(i) ?? 'pooled_isolate_$i';
 
