@@ -46,9 +46,9 @@ extension IsolatePoolExtensions on IsolatePool {
     final targetIsolate = (isolateIndex >= 0) ? isolateIndex : instance.isolateIndex;
 
     // Validate the isolate index
-    if (targetIsolate > sendPorts.length - 1) {
+    if (targetIsolate > mainToWorkerSendPorts.length - 1) {
       throw IsolatePoolException(
-        "Invalid isolate index $targetIsolate (only ${sendPorts.length} isolates available). Valid indices are 0...${sendPorts.length - 1}",
+        "Invalid isolate index $targetIsolate (only ${mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${mainToWorkerSendPorts.length - 1}",
       );
     }
 
@@ -56,7 +56,7 @@ extension IsolatePoolExtensions on IsolatePool {
 
     print('[Sending PooledInstanceRequest to isolate $targetIsolate]');
 
-    sendPorts[targetIsolate].send(request);
+    mainToWorkerSendPorts[targetIsolate]!.send(request);
 
     final completer = Completer<R>();
     requestCompleters[request.id] = completer;

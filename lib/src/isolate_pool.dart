@@ -26,6 +26,7 @@ class IsolatePool {
   final Map<int, Isolate> _isolates = {};
   final List<bool> _isolateBusyWithJob = [];
   final Map<int, PooledJobRequest> _jobs = {};
+  final Map<int, SendPort?> _mainToWorkerSendPorts = {};
   int _lastJobStartedIndex = 0;
   final Map<int, Completer> _jobCompleters = {};
   final Map<int, InstanceMapEntry> _pooledInstances = {};
@@ -35,8 +36,8 @@ class IsolatePool {
   int _isolatesStarted = 0;
   double _avgMicroseconds = 0;
 
-  final Map<String, ReceivePort> _poolReceivePorts = {};
-  final Map<String, SendPort> _poolSendPorts = {};
+  final Map<String, ReceivePort> _mainReceivePorts = {};
+  final Map<String, SendPort> _workerToMainSendPorts = {};
   final Map<String, ReceivePort> _poolErrorReceivePorts = {};
   final Map<String, SendPort> _poolErrorSendPorts = {};
 
@@ -70,19 +71,25 @@ class IsolatePool {
   int get numberOfPendingRequests => _requestCompleters.length;
 
   /// Maps of receive ports for each isolate, keyed by debug name.
-  Map<String, Stream<dynamic>> get receivePortsMap => _poolReceivePorts;
+  Map<String, Stream<dynamic>> get receivePortsMap => _mainReceivePorts;
 
   /// Maps of error receive ports for each isolate, keyed by debug name.
   Map<String, Stream<dynamic>> get errorReceivePortsMap => _poolErrorReceivePorts;
 
-  /// Maps of send ports for each isolate, keyed by debug name.
-  Map<String, SendPort> get sendPortsMap => _poolSendPorts;
+  /// Get map of receive ports in the main isolate
+  Map<String, ReceivePort> get mainReceivePorts => _mainReceivePorts;
+
+  /// Get map of send ports from worker isolates back to main isolate
+  Map<String, SendPort> get workerToMainSendPorts => _workerToMainSendPorts;
+
+  /// Get map of send ports from main isolate to worker isolates
+  Map<int, SendPort?> get mainToWorkerSendPorts => _mainToWorkerSendPorts;
 
   /// List of send ports for all running isolates.
   ///
   /// Can be used to directly send messages to these isolates.
   /// Send ports are guaranteed to be in the same order as the isolates.
-  List<SendPort> get sendPorts => _poolSendPorts.values.whereType<SendPort>().toList();
+  List<SendPort> get sendPorts => _mainToWorkerSendPorts.values.whereType<SendPort>().toList();
 
   /// Returns the isolate index where the given instance is running.
   ///
@@ -125,13 +132,14 @@ class IsolatePool {
 
     for (var i = 0; i < numberOfIsolates; i++) {
       _isolateBusyWithJob.add(false);
+      _mainToWorkerSendPorts[i] = null;
 
       final debugName = debugLabel?.call(i) ?? 'pooled_isolate_$i';
 
       final rp = ReceivePort();
       final receivePort = rp.asBroadcastStream();
-      _poolReceivePorts[debugName] = rp;
-      _poolSendPorts[debugName] = rp.sendPort;
+      _mainReceivePorts[debugName] = rp;
+      _workerToMainSendPorts[debugName] = rp.sendPort;
 
       final errorRp = ReceivePort();
       _poolErrorReceivePorts[debugName] = errorRp;
@@ -307,7 +315,7 @@ class IsolatePool {
       targetIsolateIndex = minIndex;
     }
 
-    final sendPort = sendPorts[targetIsolateIndex];
+    final sendPort = _mainToWorkerSendPorts[targetIsolateIndex];
     final proxy = PooledInstanceProxy(
       instanceId: instance.instanceId,
       isolateId: targetIsolateIndex,
@@ -321,7 +329,7 @@ class IsolatePool {
     final completer = Completer<PooledInstanceProxy<T>>();
     _creationCompleters[proxy.instanceId] = completer;
 
-    sendPort.send(instance); // Send the instance to the isolate
+    sendPort!.send(instance); // Send the instance to the isolate
 
     return completer.future;
   }
@@ -336,7 +344,7 @@ class IsolatePool {
       throw NoSuchIsolateInstanceException('Cannot find instance with ID ${instance.instanceId} to destroy it');
     }
 
-    sendPorts[index].send(DestroyRequest(instance.instanceId));
+    _mainToWorkerSendPorts[index]!.send(DestroyRequest(instance.instanceId));
     _pooledInstances.remove(instance.instanceId);
   }
 
@@ -370,13 +378,14 @@ class IsolatePool {
       }
       _requestCompleters.clear();
 
-      for (final receivePort in _poolReceivePorts.values) {
+      for (final receivePort in _mainReceivePorts.values) {
         receivePort.close();
       }
     }
 
-    _poolReceivePorts.clear();
-    _poolSendPorts.clear();
+    _mainReceivePorts.clear();
+    _workerToMainSendPorts.clear();
+    _mainToWorkerSendPorts.clear();
     _state = IsolatePoolState.stopped;
   }
 
@@ -409,7 +418,7 @@ class IsolatePool {
 
     // CRITICAL: Update the SendPort to the one received from the worker isolate
     // This is essential for two-way communication
-    _poolSendPorts[params.debugName] = params.sendPort;
+    _mainToWorkerSendPorts[params.isolateIndex] = params.sendPort;
 
     if (params.initializationError != null) {
       final error = params.initializationError;
@@ -502,7 +511,7 @@ class IsolatePool {
     }
 
     final instance = _pooledInstances[request.instanceId]!;
-    final sendPort = sendPorts[instance.isolateIndex];
+    final sendPort = _mainToWorkerSendPorts[instance.isolateIndex];
 
     if (instance.instance.remoteCallback == null) {
       print('Instance ${request.instanceId} does not have a callback initialized');
@@ -512,10 +521,10 @@ class IsolatePool {
     try {
       final result = instance.instance.remoteCallback!(request.action);
       final response = Response(request.id, result, null);
-      sendPort.send(response);
+      sendPort!.send(response);
     } catch (e) {
       final response = Response(request.id, null, e);
-      sendPort.send(response);
+      sendPort!.send(response);
     }
   }
 
@@ -524,7 +533,7 @@ class IsolatePool {
       throw IsolatePoolException("WARNING: Attempting to run job when pool is not started (state: $state)");
     }
 
-    if (sendPorts.isEmpty) {
+    if (_mainToWorkerSendPorts.isEmpty) {
       throw IsolatePoolException("ERROR: No send ports available! Isolates may not be properly initialized.");
     }
 
@@ -540,7 +549,7 @@ class IsolatePool {
 
     if (availableIsolateIndex == -1) {
       // Even if all isolates are busy, pick any random isolate to process the job
-      final randomIndex = math.Random().nextInt(sendPorts.length);
+      final randomIndex = math.Random().nextInt(_mainToWorkerSendPorts.length);
       availableIsolateIndex = randomIndex;
     }
 
@@ -548,17 +557,17 @@ class IsolatePool {
 
     // Use the isolate index specified in the job if it exists, otherwise use the available isolate index
     if (job.isolateIndex < 0 && availableIsolateIndex > -1) {
-      if (availableIsolateIndex > sendPorts.length - 1) {
+      if (availableIsolateIndex > _mainToWorkerSendPorts.length - 1) {
         throw BadResponseReceivedException(
-          "ERROR: Invalid isolate index $availableIsolateIndex (only ${sendPorts.length} isolates available). Valid indices are 0...${sendPorts.length - 1}.",
+          "ERROR: Invalid isolate index $availableIsolateIndex (only ${_mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${_mainToWorkerSendPorts.length - 1}.",
           StackTrace.current,
         );
       }
 
       job = job.copyWith(isolateIndex: availableIsolateIndex);
-    } else if (job.isolateIndex > sendPorts.length - 1) {
+    } else if (job.isolateIndex > _mainToWorkerSendPorts.length - 1) {
       throw BadResponseReceivedException(
-        "ERROR: Invalid isolate index ${job.isolateIndex} (only ${sendPorts.length} isolates available). Valid indices are 0...${sendPorts.length - 1}.",
+        "ERROR: Invalid isolate index ${job.isolateIndex} (only ${_mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${_mainToWorkerSendPorts.length - 1}.",
         StackTrace.current,
       );
     }
@@ -572,8 +581,8 @@ class IsolatePool {
         // Mark the isolate as busy before sending the job
         _isolateBusyWithJob[job.isolateIndex] = true;
 
-        final sendPort = sendPorts[job.isolateIndex];
-        sendPort.send(job);
+        final sendPort = _mainToWorkerSendPorts[job.isolateIndex];
+        sendPort!.send(job);
       } catch (e) {
         print("❌ ERROR sending job to isolate: $e");
         job = job.copyWith(started: false);
