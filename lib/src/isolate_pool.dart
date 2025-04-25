@@ -73,7 +73,7 @@ class IsolatePool {
   int get numberOfPendingRequests => _requestCompleters.length;
 
   /// Maps of Streams of messages from each isolate, keyed by debug name.
-  Map<String, Stream<dynamic>> get receivePortsStreamsMap => _mainReceivePortsStreams;
+  Map<String, Stream<dynamic>> get receivePortsStreamsMap => Map.from(_mainReceivePortsStreams);
 
   /// Maps of Streams of error messages from each isolate, keyed by debug name.
   Map<String, Stream<dynamic>> get errorReceivePortsStreamsMap => _poolErrorReceivePortsStreams;
@@ -83,7 +83,7 @@ class IsolatePool {
   /// WARNING: The Streams in this map are not broadcast Streams. DO NOT ATTACH LISTENERS TO THEM.
   ///
   /// Use [receivePortsStreamsMap] instead.
-  Map<String, ReceivePort> get mainReceivePorts => _mainReceivePorts;
+  Map<String, ReceivePort> get mainReceivePorts => Map.from(_mainReceivePorts);
 
   /// Get map of send ports from worker isolates back to main isolate
   Map<String, SendPort> get workerToMainSendPorts => _workerToMainSendPorts;
@@ -142,16 +142,14 @@ class IsolatePool {
 
       final debugName = debugLabel?.call(i) ?? 'pooled_isolate_$i';
 
-      final rp = ReceivePort();
-      final stream = rp.asBroadcastStream();
-      _mainReceivePorts[debugName] = rp;
-      _mainReceivePortsStreams[debugName] = stream;
-      _workerToMainSendPorts[debugName] = rp.sendPort;
+      final receivePort = ReceivePort();
+      _mainReceivePorts[debugName] = receivePort;
+      _mainReceivePortsStreams[debugName] = receivePort.asBroadcastStream();
+      _workerToMainSendPorts[debugName] = receivePort.sendPort;
 
       final errorRp = ReceivePort();
-      final errorStream = errorRp.asBroadcastStream();
       _poolErrorReceivePorts[debugName] = errorRp;
-      _poolErrorReceivePortsStreams[debugName] = errorStream;
+      _poolErrorReceivePortsStreams[debugName] = errorRp.asBroadcastStream();
       final errorSendPort = _poolErrorSendPorts[debugName] = errorRp.sendPort;
 
       final sw = Stopwatch();
@@ -163,7 +161,7 @@ class IsolatePool {
       }
 
       final params = PooledIsolateParams(
-        rp.sendPort,
+        receivePort.sendPort,
         errorSendPort,
         i,
         sw,
@@ -184,7 +182,7 @@ class IsolatePool {
         ),
       );
 
-      stream.listen((data) {
+      receivePortsStreamsMap[debugName]!.listen((data) {
         if (_state == IsolatePoolState.stopped) {
           // print('Received isolate message when pool is already stopped');
           errorSendPort.send(IsolatePoolStoppedException(
