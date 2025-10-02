@@ -604,7 +604,7 @@ class IsolatePool {
     // print("Available isolate index: $availableIsolateIndex, Pending jobs: ${pendingJobs.length}, Total isolates: ${_isolates.length}");
 
     if (pendingJobs.isEmpty) {
-      print("[🟧 Job queue is empty.]");
+      // print("[🟧 Job queue is empty.]");
       return;
     }
 
@@ -637,7 +637,7 @@ class IsolatePool {
       try {
         job = job.copyWith(started: true);
 
-        print("[Sending job ${job.jobIndex} to isolate ${job.isolateIndex}]");
+        // print("[Sending job ${job.jobIndex} to isolate ${job.isolateIndex}]");
 
         // Mark the isolate as busy before sending the job
         _isolateBusyWithJob[job.isolateIndex] = true;
