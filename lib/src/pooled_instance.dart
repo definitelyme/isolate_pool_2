@@ -104,22 +104,22 @@ class PooledInstanceProxy<T> {
   ///
   /// Parameters:
   /// - [action]: The action to send to the remote instance
-  /// - [isolateIndex]: Optional index of the isolate to execute the action on.
+  /// - [isolate]: Optional index of the isolate to execute the action on.
   ///   If not specified, the action will be executed on the isolate where the instance was created.
   ///
   /// Re-throws any exception that occurs in the executing isolate
   /// with the original exception type and a combined stack trace
   /// showing both where the error occurred in the isolate and
   /// where it was caught in the main isolate.
-  Future<R> callRemoteMethod<R>(Action action, {int? isolateIndex}) {
-    isolateIndex ??= -1;
+  Future<R> callRemoteMethod<R>(Action action, {int? isolate}) {
+    isolate ??= -1;
 
     if (_pool.state == IsolatePoolState.stopped) {
       throw IsolatePoolStoppedException('Isolate pool has been stopped, cannot call pooled instance method');
     }
 
     // If no specific isolate is requested, use the one where the instance was created
-    final targetIsolateIndex = isolateIndex >= 0 ? isolateIndex : isolateId;
+    final targetIsolateIndex = isolate >= 0 ? isolate : isolateId;
 
     return _pool.sendRequest<R>(instanceId, action, targetIsolateIndex);
   }

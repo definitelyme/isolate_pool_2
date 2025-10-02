@@ -6,6 +6,7 @@ import 'enums.dart';
 import 'exceptions.dart';
 import 'internal/messages.dart';
 import 'internal/worker.dart';
+import 'isolate_pool_validation.dart';
 import 'pooled_instance.dart';
 import 'pooled_job.dart';
 
@@ -258,11 +259,19 @@ class IsolatePool {
   /// was caught in the main isolate.
   ///
   /// Throws [IsolatePoolStoppedException] if the pool has been stopped.
+  /// Throws [IsolatePoolException] if the specified isolate index is invalid.
   Future<T> scheduleJob<T>(PooledJob<T> job, [int? isolateIndex]) {
     isolateIndex ??= -1;
 
     if (state == IsolatePoolState.stopped) {
       throw IsolatePoolStoppedException('Isolate pool has been stopped, cannot schedule a job');
+    }
+
+    // Validate isolate index early
+    if (isolateIndex >= numberOfIsolates) {
+      throw IsolatePoolException(
+        'Invalid isolate index $isolateIndex (only $numberOfIsolates isolates available). Valid indices are 0...${numberOfIsolates - 1}, or -1 to use any available isolate.',
+      );
     }
 
     final jobIndex = _lastJobStartedIndex++;
@@ -290,6 +299,17 @@ class IsolatePool {
     PooledCallback<T>? callback,
     int? isolateIndex,
   }) async {
+    // Validate that the instance can be sent to an isolate
+    final validationErrors = instance.validateForIsolate();
+
+    if (validationErrors.isNotEmpty) {
+      throw IsolatePoolException(
+        'Instance contains validation errors:\n'
+        '${validationErrors.join('\n')}',
+        StackTrace.current,
+      );
+    }
+
     isolateIndex ??= -1;
 
     if (state == IsolatePoolState.stopped) {
@@ -336,7 +356,17 @@ class IsolatePool {
     final completer = Completer<PooledInstanceProxy<T>>();
     _creationCompleters[proxy.instanceId] = completer;
 
-    sendPort!.send(instance); // Send the instance to the isolate
+    try {
+      sendPort!.send(instance); // Send the instance to the isolate
+    } catch (e, st) {
+      completer.completeError(e);
+      _creationCompleters.remove(proxy.instanceId);
+      _pooledInstances.remove(proxy.instanceId);
+
+      print('[DEBUG]: error sending instance to isolate: $e\n$st');
+
+      rethrow;
+    }
 
     return completer.future;
   }
@@ -344,14 +374,38 @@ class IsolatePool {
   /// Removes an instance from the pool.
   ///
   /// Makes the instance available for garbage collection.
+  ///
+  /// Parameters:
+  /// - [instance]: The instance proxy to destroy
+  /// - [isolate]: Optional index of the isolate where the instance should be destroyed.
+  ///   If not specified, uses the isolate where the instance was originally created.
+  ///
   /// Throws [NoSuchIsolateInstanceException] if the instance is not found.
-  void destroyInstance(PooledInstanceProxy instance) {
-    final index = indexOfInstance(instance);
-    if (index == -1) {
-      throw NoSuchIsolateInstanceException('Cannot find instance with ID ${instance.instanceId} to destroy it');
+  /// Throws [IsolatePoolException] if the specified isolate index is invalid.
+  void destroyInstance(PooledInstanceProxy instance, {int? isolate}) {
+    // Guard: Check if already destroyed or never existed
+    if (!_pooledInstances.containsKey(instance.instanceId)) {
+      print('⚠️ Warning: Instance ${instance.instanceId} already destroyed or does not exist. Skipping destroyInstance call.');
+      return; // Silently ignore instead of throwing
     }
 
-    _mainToWorkerSendPorts[index]!.send(DestroyRequest(instance.instanceId));
+    // Determine target isolate index
+    final targetIndex = isolate ?? indexOfInstance(instance);
+
+    if (targetIndex == -1) {
+      throw NoSuchIsolateInstanceException(
+        'Cannot find instance with ID ${instance.instanceId} to destroy it!',
+      );
+    }
+
+    // Validate isolate index
+    if (targetIndex < 0 || targetIndex >= _mainToWorkerSendPorts.length) {
+      throw IsolatePoolException(
+        'Invalid isolate index $targetIndex (only ${_mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${_mainToWorkerSendPorts.length - 1}.',
+      );
+    }
+
+    _mainToWorkerSendPorts[targetIndex]!.send(DestroyRequest(instance.instanceId));
     _pooledInstances.remove(instance.instanceId);
   }
 

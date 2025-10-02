@@ -52,9 +52,16 @@ extension IsolatePoolExtensions on IsolatePool {
       );
     }
 
+    // Warning: Cross-isolate call detection
+    if (isolateIndex >= 0 && isolateIndex != instance.isolateIndex) {
+      print('⚠️ Warning: Attempting to call instance $instanceId on isolate $targetIsolate, '
+          'but instance was created in isolate ${instance.isolateIndex}. '
+          'This may fail if the instance does not exist in the target isolate.');
+    }
+
     final request = Request(instanceId, action);
 
-    print('[Sending PooledInstanceRequest to isolate $targetIsolate]');
+    // print('[Sending PooledInstanceRequest to isolate $targetIsolate]');
 
     mainToWorkerSendPorts[targetIsolate]!.send(request);
 

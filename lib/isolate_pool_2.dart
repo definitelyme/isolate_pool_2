@@ -54,8 +54,9 @@
 library;
 
 export 'src/callback_isolate.dart';
+export 'src/enums.dart';
 export 'src/exceptions.dart';
 export 'src/isolate_pool.dart';
-export 'src/enums.dart';
+export 'src/isolate_pool_validation.dart';
 export 'src/pooled_instance.dart';
 export 'src/pooled_job.dart';
