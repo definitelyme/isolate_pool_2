@@ -55,6 +55,7 @@ class IsolatePool {
   final Map<String, SendPort> _poolErrorSendPorts = {};
   final Map<int, InstanceMapEntry> _pooledInstances = {};
   final Map<int, Completer> _requestCompleters = {};
+  final Map<int, int> _requestToInstance = {}; // Maps requestId -> instanceId
   final Completer _started = Completer();
   final Map<String, SendPort> _workerToMainSendPorts = {};
 
@@ -226,6 +227,8 @@ class IsolatePool {
             _processRequest(data);
           case Response():
             processResponse(data, _requestCompleters);
+            // Clean up request tracking (response completes the request)
+            _requestToInstance.remove(data.requestId);
             // Update health status - successful response means isolate is healthy
             _updateHealthSuccess(data.isolateIndex);
           case PooledIsolateParams():
@@ -846,6 +849,13 @@ class IsolatePool {
     return await _ensureIsolateHealthy(isolateIndex);
   }
 
+  /// Internal method: Tracks request-to-instance mapping.
+  ///
+  /// This is exposed for use by extensions to properly handle dead isolate cleanup.
+  void trackRequestToInstanceInternal(int requestId, int instanceId) {
+    _requestToInstance[requestId] = instanceId;
+  }
+
   // ============================================================================
   // Health Checking Methods
   // ============================================================================
@@ -982,12 +992,22 @@ class IsolatePool {
     }
 
     // Fail all pending requests for instances on this isolate
-    final requestsToFail = <int>[];
+    // First, collect instance IDs on the dead isolate
+    final instancesOnDeadIsolate = <int>{};
     for (final entry in _pooledInstances.entries) {
       if (entry.value.isolateIndex == isolateIndex) {
-        // Find all requests for this instance
-        // (requests are tracked globally, not per-instance, so we check all)
-        requestsToFail.addAll(_requestCompleters.keys);
+        instancesOnDeadIsolate.add(entry.key); // entry.key is instanceId
+      }
+    }
+
+    // Then, fail only requests that belong to those instances
+    final requestsToFail = <int>[];
+    for (final requestEntry in _requestToInstance.entries) {
+      final requestId = requestEntry.key;
+      final instanceId = requestEntry.value;
+
+      if (instancesOnDeadIsolate.contains(instanceId)) {
+        requestsToFail.add(requestId);
       }
     }
 
@@ -1002,6 +1022,7 @@ class IsolatePool {
         );
       }
       _requestCompleters.remove(requestId);
+      _requestToInstance.remove(requestId); // Clean up tracking
     }
 
     // Call error handler if registered

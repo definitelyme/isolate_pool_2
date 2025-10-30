@@ -78,6 +78,9 @@ extension IsolatePoolExtensions on IsolatePool {
     final completer = Completer<R>();
     requestCompleters[request.id] = completer;
 
+    // Track which instance this request belongs to (for proper cleanup on isolate death)
+    trackRequestToInstanceInternal(request.id, instanceId);
+
     return completer.future;
   }
 }
