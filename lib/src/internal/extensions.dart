@@ -25,7 +25,7 @@ extension IsolatePoolExtensions on IsolatePool {
   /// - The instance is not yet started
   /// - The pool has been stopped
   /// - The specified isolate index is invalid
-  Future<R> sendRequest<R>(int instanceId, Action action, [int? isolateIndex]) {
+  Future<R> sendRequest<R>(int instanceId, Action action, [int? isolateIndex]) async {
     isolateIndex ??= -1;
 
     if (state == IsolatePoolState.stopped) {
@@ -57,6 +57,16 @@ extension IsolatePoolExtensions on IsolatePool {
       print('⚠️ Warning: Attempting to call instance $instanceId on isolate $targetIsolate, '
           'but instance was created in isolate ${instance.isolateIndex}. '
           'This may fail if the instance does not exist in the target isolate.');
+    }
+
+    if (healthConfig.enabled && healthConfig.checkBeforeDispatching) {
+      final isHealthy = await ensureIsolateHealthyInternal(targetIsolate);
+      if (!isHealthy) {
+        throw IsolateDeadException(
+          targetIsolate,
+          'Isolate #$targetIsolate hosting instance $instanceId is not responsive',
+        );
+      }
     }
 
     final request = Request(instanceId, action);
