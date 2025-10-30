@@ -390,6 +390,18 @@ class IsolatePool {
     final completer = Completer<PooledInstanceProxy<T>>();
     _creationCompleters[proxy.instanceId] = completer;
 
+    if (healthConfig.enabled && healthConfig.checkBeforeDispatching) {
+      final isHealthy = await _ensureIsolateHealthy(targetIsolateIndex);
+      if (!isHealthy) {
+        _creationCompleters.remove(proxy.instanceId);
+        _pooledInstances.remove(proxy.instanceId);
+        throw IsolateDeadException(
+          targetIsolateIndex,
+          'Cannot create instance on isolate #$targetIsolateIndex - isolate is not responsive',
+        );
+      }
+    }
+
     try {
       sendPort!.send(instance); // Send the instance to the isolate
     } catch (e, st) {
@@ -525,6 +537,9 @@ class IsolatePool {
       }
       _creationCompleters.remove(response.instanceId);
       _pooledInstances[response.instanceId]!.state = PooledInstanceStatus.started;
+
+      final isolateIndex = _pooledInstances[response.instanceId]!.isolateIndex;
+      _updateHealthSuccess(isolateIndex);
     }
   }
 

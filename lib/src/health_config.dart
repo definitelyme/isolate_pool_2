@@ -50,6 +50,7 @@ class IsolateHealthConfig {
   ///
   /// Applies to:
   /// - Job scheduling via [scheduleJob()]
+  /// - Instance creation via [addInstance()]
   /// - Instance requests via [sendRequest()]
   ///
   /// Defaults to `false`
