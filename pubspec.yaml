@@ -4,8 +4,11 @@ version: 1.0.7
 homepage: https://github.com/maxim-saplin/isolate_pool
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  meta: ^1.17.0
 
 dev_dependencies:
   test:
-  lints: 
+  lints:

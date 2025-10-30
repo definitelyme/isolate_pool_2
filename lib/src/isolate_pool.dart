@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:isolate';
 import 'dart:math' as math;
 
+import 'package:meta/meta.dart';
+
 import 'enums.dart';
 import 'exceptions.dart';
 import 'health_config.dart';
@@ -845,6 +847,7 @@ class IsolatePool {
   ///
   /// This is exposed for use by extensions. Do not call directly from
   /// application code - use [pingIsolate] or [isIsolateHealthy] instead.
+  @internal
   Future<bool> ensureIsolateHealthyInternal(int isolateIndex) async {
     return await _ensureIsolateHealthy(isolateIndex);
   }
@@ -852,6 +855,7 @@ class IsolatePool {
   /// Internal method: Tracks request-to-instance mapping.
   ///
   /// This is exposed for use by extensions to properly handle dead isolate cleanup.
+  @internal
   void trackRequestToInstanceInternal(int requestId, int instanceId) {
     _requestToInstance[requestId] = instanceId;
   }
