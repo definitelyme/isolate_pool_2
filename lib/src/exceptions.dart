@@ -109,3 +109,17 @@ class IsolateTimeoutException extends IsolatePoolException {
   @override
   String toString() => '$operation timed out after $timeoutMs ms: $message${stackTrace != null ? '\n$stackTrace' : ''}';
 }
+
+/// Thrown when an isolate is detected as dead or unresponsive.
+///
+/// This exception is thrown when health checks fail or when an isolate
+/// does not respond to ping requests within the configured timeout.
+class IsolateDeadException extends IsolatePoolException {
+  /// The isolate index that is dead or unresponsive.
+  final int isolateIndex;
+
+  const IsolateDeadException(this.isolateIndex, super.message, [super.stackTrace]);
+
+  @override
+  String toString() => 'Isolate #$isolateIndex is dead or unresponsive: $message${stackTrace != null ? '\n$stackTrace' : ''}';
+}

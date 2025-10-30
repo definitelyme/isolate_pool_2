@@ -25,7 +25,7 @@ extension IsolatePoolExtensions on IsolatePool {
   /// - The instance is not yet started
   /// - The pool has been stopped
   /// - The specified isolate index is invalid
-  Future<R> sendRequest<R>(int instanceId, Action action, [int? isolateIndex]) {
+  Future<R> sendRequest<R>(int instanceId, Action action, [int? isolateIndex]) async {
     isolateIndex ??= -1;
 
     if (state == IsolatePoolState.stopped) {
@@ -50,6 +50,16 @@ extension IsolatePoolExtensions on IsolatePool {
       throw IsolatePoolException(
         "Invalid isolate index $targetIsolate (only ${mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${mainToWorkerSendPorts.length - 1}",
       );
+    }
+
+    if (healthConfig.enabled && healthConfig.checkBeforeDispatching) {
+      final isHealthy = await ensureIsolateHealthyInternal(targetIsolate);
+      if (!isHealthy) {
+        throw IsolateDeadException(
+          targetIsolate,
+          'Isolate #$targetIsolate hosting instance $instanceId is not responsive',
+        );
+      }
     }
 
     final request = Request(instanceId, action);

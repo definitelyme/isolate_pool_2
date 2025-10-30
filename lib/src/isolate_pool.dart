@@ -4,10 +4,50 @@ import 'dart:math' as math;
 
 import 'enums.dart';
 import 'exceptions.dart';
+import 'health_config.dart';
 import 'internal/messages.dart';
 import 'internal/worker.dart';
 import 'pooled_instance.dart';
 import 'pooled_job.dart';
+
+class IsolateHealthInfo {
+  IsolateHealthInfo._({
+    required this.isolateIndex,
+    DateTime? lastKnownGood,
+    bool? confirmedDead,
+    int? consecutiveFailures,
+  })  : _lastKnownGood = lastKnownGood ?? DateTime.now(),
+        _confirmedDead = confirmedDead ?? false,
+        _consecutiveFailures = consecutiveFailures ?? 0;
+
+  /// The isolate index.
+  final int isolateIndex;
+
+  /// Whether this isolate has been confirmed as dead after failed health checks.
+  bool _confirmedDead;
+
+  /// Number of consecutive health check failures.
+  int _consecutiveFailures;
+
+  /// Last time this isolate successfully responded (job completion or ping).
+  DateTime _lastKnownGood;
+
+  @override
+  String toString() => 'IsolateHealthInfo('
+      'index: $isolateIndex, '
+      'lastKnownGood: $_lastKnownGood, '
+      'isHealthy: $isHealthy, '
+      'consecutiveFailures: $_consecutiveFailures'
+      ')';
+
+  bool get confirmedDead => _confirmedDead;
+  int get consecutiveFailures => _consecutiveFailures;
+
+  /// Whether this isolate is considered healthy.
+  bool get isHealthy => !_confirmedDead;
+
+  DateTime get lastKnownGood => _lastKnownGood;
+}
 
 /// Creates and manages a pool of isolates for parallel processing.
 ///
@@ -20,63 +60,69 @@ import 'pooled_job.dart';
 /// Pooled instances persist in the isolates, can maintain state, and
 /// respond to multiple calls.
 class IsolatePool {
-  /// Number of isolates in the pool.
-  final int numberOfIsolates;
-
-  final Map<int, Isolate> _isolates = {};
-  final List<bool> _isolateBusyWithJob = [];
-  final Map<int, PooledJobRequest> _jobs = {};
-  final Map<int, SendPort?> _mainToWorkerSendPorts = {};
-  int _lastJobStartedIndex = 0;
-  final Map<int, Completer> _jobCompleters = {};
-  final Map<int, InstanceMapEntry> _pooledInstances = {};
-  final Map<int, Completer> _requestCompleters = {};
-  final Map<int, Completer<PooledInstanceProxy>> _creationCompleters = {};
-
-  int _isolatesStarted = 0;
-  double _avgMicroseconds = 0;
-
-  final Map<String, ReceivePort> _mainReceivePorts = {};
-  final Map<String, Stream<dynamic>> _mainReceivePortsStreams = {};
-  final Map<String, SendPort> _workerToMainSendPorts = {};
-  final Map<String, ReceivePort> _poolErrorReceivePorts = {};
-  final Map<String, Stream<dynamic>> _poolErrorReceivePortsStreams = {};
-  final Map<String, SendPort> _poolErrorSendPorts = {};
-
-  IsolatePoolState _state = IsolatePoolState.notStarted;
-  final Completer _started = Completer();
-
   /// Creates a new [IsolatePool] with the specified number of isolates.
   ///
   /// The pool is initially in the [IsolatePoolState.notStarted] state.
   /// Call [start] to start the pool before using it.
-  IsolatePool(this.numberOfIsolates);
-
-  /// Current state of the isolate pool.
-  IsolatePoolState get state => _state;
-
-  /// Future that completes when the pool has started.
   ///
-  /// You can await this future to ensure the pool is ready before using it.
-  Future get started => _started.future;
+  /// Optionally provide [healthConfig] to customize health checking behavior.
+  /// By default, health checking is enabled with sensible defaults.
+  IsolatePool(
+    this.numberOfIsolates, {
+    this.healthConfig = const IsolateHealthConfig(),
+  });
 
-  /// Map of pooled instances, keyed by instance ID.
-  Map<int, InstanceMapEntry> get pooledInstances => _pooledInstances;
+  /// Configuration for isolate health checking.
+  final IsolateHealthConfig healthConfig;
 
-  /// Map of request completers, keyed by request ID.
-  Map<int, Completer> get requestCompleters => _requestCompleters;
+  /// Number of isolates in the pool.
+  final int numberOfIsolates;
 
-  /// Number of pooled instances currently managed by this pool.
-  int get numberOfPooledInstances => _pooledInstances.length;
+  final Map<int, Completer<PooledInstanceProxy>> _creationCompleters = {};
+  final List<bool> _isolateBusyWithJob = [];
+  final Map<int, Isolate> _isolates = {};
+  final Map<int, Completer> _jobCompleters = {};
+  final Map<int, PooledJobRequest> _jobs = {};
+  final Map<String, ReceivePort> _mainReceivePorts = {};
+  final Map<String, Stream<dynamic>> _mainReceivePortsStreams = {};
+  final Map<int, SendPort?> _mainToWorkerSendPorts = {};
+  final Map<String, ReceivePort> _poolErrorReceivePorts = {};
+  final Map<String, Stream<dynamic>> _poolErrorReceivePortsStreams = {};
+  final Map<String, SendPort> _poolErrorSendPorts = {};
+  final Map<int, InstanceMapEntry> _pooledInstances = {};
+  final Map<int, Completer> _requestCompleters = {};
+  final Completer _started = Completer();
+  final Map<String, SendPort> _workerToMainSendPorts = {};
 
-  /// Number of pending requests awaiting response.
-  int get numberOfPendingRequests => _requestCompleters.length;
+  double _avgMicroseconds = 0;
+  // Add these properties and methods for error handling
 
-  /// Maps of Streams of messages from each isolate, keyed by debug name.
-  Map<String, Stream<dynamic>> get receivePortsStreamsMap => Map.from(_mainReceivePortsStreams);
+  // Map of error handlers by type
+  final Map<IsolateErrorType, void Function(Object error)> _errorHandlers = {};
+
+  // Health tracking
+  final Map<int, IsolateHealthInfo> _isolateHealth = {};
+
+  int _isolatesStarted = 0;
+  int _lastJobStartedIndex = 0;
+  IsolatePoolState _state = IsolatePoolState.notStarted;
 
   /// Maps of Streams of error messages from each isolate, keyed by debug name.
   Map<String, Stream<dynamic>> get errorReceivePortsStreamsMap => _poolErrorReceivePortsStreams;
+
+  /// Gets health status information for all isolates.
+  ///
+  /// Returns a map of isolate index to health information.
+  Map<int, IsolateHealthInfo> get healthStatus {
+    if (!healthConfig.enabled) return {};
+
+    return Map.fromEntries(
+      _isolateHealth.entries.map((entry) {
+        final health = entry.value;
+        return MapEntry(entry.key, health);
+      }),
+    );
+  }
 
   /// Get map of receive ports in the main isolate.
   ///
@@ -85,17 +131,40 @@ class IsolatePool {
   /// Use [receivePortsStreamsMap] instead.
   Map<String, ReceivePort> get mainReceivePorts => Map.from(_mainReceivePorts);
 
-  /// Get map of send ports from worker isolates back to main isolate
-  Map<String, SendPort> get workerToMainSendPorts => _workerToMainSendPorts;
-
   /// Get map of send ports from main isolate to worker isolates
   Map<int, SendPort?> get mainToWorkerSendPorts => _mainToWorkerSendPorts;
+
+  /// Number of pending requests awaiting response.
+  int get numberOfPendingRequests => _requestCompleters.length;
+
+  /// Number of pooled instances currently managed by this pool.
+  int get numberOfPooledInstances => _pooledInstances.length;
+
+  /// Map of pooled instances, keyed by instance ID.
+  Map<int, InstanceMapEntry> get pooledInstances => _pooledInstances;
+
+  /// Maps of Streams of messages from each isolate, keyed by debug name.
+  Map<String, Stream<dynamic>> get receivePortsStreamsMap => Map.from(_mainReceivePortsStreams);
+
+  /// Map of request completers, keyed by request ID.
+  Map<int, Completer> get requestCompleters => _requestCompleters;
 
   /// List of send ports for all running isolates.
   ///
   /// Can be used to directly send messages to these isolates.
   /// Send ports are guaranteed to be in the same order as the isolates.
   List<SendPort> get sendPorts => _mainToWorkerSendPorts.values.whereType<SendPort>().toList();
+
+  /// Future that completes when the pool has started.
+  ///
+  /// You can await this future to ensure the pool is ready before using it.
+  Future get started => _started.future;
+
+  /// Current state of the isolate pool.
+  IsolatePoolState get state => _state;
+
+  /// Get map of send ports from worker isolates back to main isolate
+  Map<String, SendPort> get workerToMainSendPorts => _workerToMainSendPorts;
 
   /// Returns the isolate index where the given instance is running.
   ///
@@ -198,6 +267,8 @@ class IsolatePool {
             _processRequest(data);
           case Response():
             processResponse(data, _requestCompleters);
+            // Update health status - successful response means isolate is healthy
+            _updateHealthSuccess(data.isolateIndex);
           case PooledIsolateParams():
             _processIsolateStartResult(data, last);
 
@@ -231,6 +302,11 @@ class IsolatePool {
       final isolate = await entry.value;
 
       _isolates.putIfAbsent(entry.key, () => isolate);
+
+      // Initialize health tracking for this isolate
+      if (healthConfig.enabled) {
+        _isolateHealth.putIfAbsent(entry.key, () => IsolateHealthInfo._(isolateIndex: entry.key));
+      }
 
       // Resume only the first isolate for sequential initialization
       if (entry.key == 0 && policy == InitializationPolicy.sequential) {
@@ -396,6 +472,27 @@ class IsolatePool {
     _state = IsolatePoolState.stopped;
   }
 
+  /// Sets a custom error handler for specific types of isolate errors.
+  ///
+  /// When an error of the specified [errorType] occurs in any isolate,
+  /// the [handler] function will be called with the error object.
+  ///
+  /// This allows for centralized error handling and reporting without
+  /// having to catch errors in each individual job or instance method.
+  void setErrorHandler(IsolateErrorType errorType, void Function(Object error) handler) {
+    _errorHandlers[errorType] = handler;
+  }
+
+  /// Removes a previously set error handler for the specified [errorType].
+  void removeErrorHandler(IsolateErrorType errorType) {
+    _errorHandlers.remove(errorType);
+  }
+
+  /// Clears all custom error handlers.
+  void clearErrorHandlers() {
+    _errorHandlers.clear();
+  }
+
   void _processCreationResponse(CreationResponse response) {
     if (!_creationCompleters.containsKey(response.instanceId)) {
       print('Invalid instance ID ${response.instanceId} received in creation response');
@@ -471,6 +568,9 @@ class IsolatePool {
 
   void _processJobResult(PooledJobResult result) {
     _isolateBusyWithJob[result.isolateIndex] = false; // Mark isolate as available
+
+    // Update health status - successful job completion means isolate is healthy
+    _updateHealthSuccess(result.isolateIndex);
 
     assert(_jobCompleters.containsKey(result.jobIndex));
 
@@ -580,55 +680,50 @@ class IsolatePool {
     }
 
     if (pendingJobs.isNotEmpty) {
-      try {
-        job = job.copyWith(started: true);
+      if (healthConfig.enabled && healthConfig.checkBeforeDispatching) {
+        _ensureIsolateHealthy(job.isolateIndex).then((isHealthy) {
+          if (!isHealthy) {
+            print("❌ Isolate ${job.isolateIndex} is not healthy, failing job ${job.jobIndex}");
+            _handleDeadIsolate(job.isolateIndex);
 
-        print("[Sending job ${job.jobIndex} to isolate ${job.isolateIndex}]");
+            // Job completer should already be failed by _handleDeadIsolate
+            // Remove the job from pending
+            _jobs.remove(job.jobIndex);
+            return;
+          }
 
-        // Mark the isolate as busy before sending the job
-        _isolateBusyWithJob[job.isolateIndex] = true;
-
-        final sendPort = _mainToWorkerSendPorts[job.isolateIndex];
-        sendPort!.send(job);
-      } catch (e) {
-        print("❌ ERROR sending job to isolate: $e");
-        job = job.copyWith(started: false);
-        _isolateBusyWithJob[job.isolateIndex] = false;
+          _dispatchJobToIsolate(job);
+        });
+      } else {
+        _dispatchJobToIsolate(job);
       }
-
-      // Update the job in the map
-      _jobs[job.jobIndex] = job;
     }
   }
 
-  // Add these properties and methods for error handling
+  /// Dispatches a job to its assigned isolate.
+  void _dispatchJobToIsolate(PooledJobRequest job) {
+    try {
+      job = job.copyWith(started: true);
 
-  // Map of error handlers by type
-  final Map<IsolateErrorType, void Function(Object error)> _errorHandlers = {};
+      print("[Sending job ${job.jobIndex} to isolate ${job.isolateIndex}]");
 
-  /// Sets a custom error handler for specific types of isolate errors.
-  ///
-  /// When an error of the specified [errorType] occurs in any isolate,
-  /// the [handler] function will be called with the error object.
-  ///
-  /// This allows for centralized error handling and reporting without
-  /// having to catch errors in each individual job or instance method.
-  void setErrorHandler(IsolateErrorType errorType, void Function(Object error) handler) {
-    _errorHandlers[errorType] = handler;
-  }
+      // Mark the isolate as busy before sending the job
+      _isolateBusyWithJob[job.isolateIndex] = true;
 
-  /// Removes a previously set error handler for the specified [errorType].
-  void removeErrorHandler(IsolateErrorType errorType) {
-    _errorHandlers.remove(errorType);
-  }
+      final sendPort = _mainToWorkerSendPorts[job.isolateIndex];
+      sendPort!.send(job);
+    } catch (e) {
+      print("❌ ERROR sending job to isolate: $e");
+      job = job.copyWith(started: false);
+      _isolateBusyWithJob[job.isolateIndex] = false;
+    }
 
-  /// Clears all custom error handlers.
-  void clearErrorHandlers() {
-    _errorHandlers.clear();
+    // Update the job in the map
+    _jobs[job.jobIndex] = job;
   }
 
   /// Central handler for errors received from isolates via error ports.
-  void _handleIsolateError(dynamic error) {
+  void _handleIsolateError(dynamic error) async {
     // Check if this is an IsolateError with a wrapped error
     final unwrappedError = error is IsolateError ? error.unwrappedError : error;
     final errorStackTrace = error is IsolateError ? error.originalStackTrace : StackTrace.current;
@@ -652,6 +747,16 @@ class IsolatePool {
       errorType = IsolateErrorType.unknown;
     }
 
+    // Health check: verify if isolate is actually dead after error
+    if (healthConfig.enabled && error is IsolateError) {
+      final isolateIndex = error.isolateIndex;
+      final isHealthy = await _pingIsolate(isolateIndex);
+      if (!isHealthy) {
+        print('⚠️  Isolate #$isolateIndex is unresponsive after error, marking as dead');
+        _handleDeadIsolate(isolateIndex);
+      }
+    }
+
     // Call specific error handler if registered
     if (_errorHandlers.containsKey(errorType)) {
       try {
@@ -670,6 +775,228 @@ class IsolatePool {
     } else {
       // No handler registered, just print the error
       print('❌ Unhandled isolate error of type $errorType: $unwrappedError\n$errorStackTrace');
+    }
+  }
+
+  // ============================================================================
+  // Public Health API
+  // ============================================================================
+
+  /// Checks if a specific isolate is currently healthy.
+  ///
+  /// Returns `true` if the isolate is responsive and not marked as dead.
+  /// Returns `false` if the isolate is dead, or if the index is invalid.
+  bool isIsolateHealthy(int isolateIndex) {
+    if (!healthConfig.enabled) return true;
+    final health = _isolateHealth[isolateIndex];
+    return health != null && !health.confirmedDead;
+  }
+
+  /// Manually triggers a health check on a specific isolate.
+  ///
+  /// This performs an immediate ping to verify the isolate is responsive.
+  /// Returns `true` if the isolate responds, `false` otherwise.
+  ///
+  /// Use this when you want to explicitly verify an isolate's health
+  /// outside of the normal automatic checking.
+  Future<bool> pingIsolate(int isolateIndex) async {
+    if (!healthConfig.enabled) return true;
+    if (isolateIndex < 0 || isolateIndex >= numberOfIsolates) {
+      return false;
+    }
+    return await _pingIsolate(isolateIndex);
+  }
+
+  // ============================================================================
+  // Internal Methods (for extensions and internal use)
+  // ============================================================================
+
+  /// Internal method: Ensures isolate is healthy before use.
+  ///
+  /// This is exposed for use by extensions. Do not call directly from
+  /// application code - use [pingIsolate] or [isIsolateHealthy] instead.
+  Future<bool> ensureIsolateHealthyInternal(int isolateIndex) async {
+    return await _ensureIsolateHealthy(isolateIndex);
+  }
+
+  // ============================================================================
+  // Health Checking Methods
+  // ============================================================================
+
+  /// Updates health status when an isolate successfully completes work.
+  void _updateHealthSuccess(int isolateIndex) {
+    if (!healthConfig.enabled) return;
+
+    final health = _isolateHealth[isolateIndex];
+    if (health == null) return;
+
+    health._lastKnownGood = DateTime.now();
+    health._consecutiveFailures = 0;
+    health._confirmedDead = false;
+  }
+
+  /// Updates health status when an isolate fails a health check.
+  void _updateHealthFailure(int isolateIndex) {
+    if (!healthConfig.enabled) return;
+
+    final health = _isolateHealth[isolateIndex];
+    if (health == null) return;
+
+    health._consecutiveFailures++;
+
+    if (health.consecutiveFailures >= healthConfig.maxConsecutiveFailures) {
+      health._confirmedDead = true;
+    }
+  }
+
+  /// Performs a ping health check on a specific isolate.
+  ///
+  /// Returns `true` if the isolate responds within the timeout, `false` otherwise.
+  Future<bool> _pingIsolate(int isolateIndex) async {
+    final isolate = _isolates[isolateIndex];
+    final sendPort = _mainToWorkerSendPorts[isolateIndex];
+
+    if (isolate == null || sendPort == null) {
+      return false;
+    }
+
+    final responsePort = ReceivePort();
+    final completer = Completer<bool>();
+
+    // Setup listener for ping response
+    late StreamSubscription subscription;
+    subscription = responsePort.listen((_) {
+      if (!completer.isCompleted) {
+        completer.complete(true);
+        _updateHealthSuccess(isolateIndex);
+        subscription.cancel();
+        responsePort.close();
+      }
+    });
+
+    // Setup timeout
+    final timeoutTimer = Timer(healthConfig.pingTimeout, () {
+      if (!completer.isCompleted) {
+        completer.complete(false);
+        _updateHealthFailure(isolateIndex);
+        subscription.cancel();
+        responsePort.close();
+      }
+    });
+
+    try {
+      // Send ping with immediate priority for quick response
+      isolate.ping(responsePort.sendPort, response: null, priority: Isolate.immediate);
+      final result = await completer.future;
+      timeoutTimer.cancel();
+      return result;
+    } catch (e) {
+      timeoutTimer.cancel();
+      await subscription.cancel();
+      responsePort.close();
+      _updateHealthFailure(isolateIndex);
+      return false;
+    }
+  }
+
+  /// Ensures an isolate is healthy before using it.
+  ///
+  /// Uses smart caching: if the isolate recently completed work successfully,
+  /// it's considered healthy without an explicit ping. Otherwise, performs
+  /// a ping health check.
+  ///
+  /// Returns `true` if the isolate is healthy, `false` if it's dead or unresponsive.
+  Future<bool> _ensureIsolateHealthy(int isolateIndex) async {
+    if (!healthConfig.enabled) return true;
+
+    final health = _isolateHealth[isolateIndex];
+    if (health == null) return false;
+
+    // If already confirmed dead, no need to check again
+    if (health.confirmedDead) return false;
+
+    // Check if health status is fresh (recently validated)
+    final timeSinceLastGood = DateTime.now().difference(health.lastKnownGood);
+    if (timeSinceLastGood < healthConfig.stalenessThreshold) {
+      return true; // Recent successful activity = healthy
+    }
+
+    // Health status is stale, perform explicit ping
+    return await _pingIsolate(isolateIndex);
+  }
+
+  /// Handles a dead isolate by failing pending work and triggering error handlers.
+  void _handleDeadIsolate(int isolateIndex) {
+    final health = _isolateHealth[isolateIndex];
+    if (health == null) return;
+
+    health._confirmedDead = true;
+
+    // Fail all pending jobs for this isolate
+    final jobsToFail = <int>[];
+    for (final entry in _jobs.entries) {
+      if (entry.value.isolateIndex == isolateIndex) {
+        jobsToFail.add(entry.key);
+      }
+    }
+
+    for (final jobId in jobsToFail) {
+      final completer = _jobCompleters[jobId];
+      if (completer != null && !completer.isCompleted) {
+        completer.completeError(
+          IsolateDeadException(
+            isolateIndex,
+            'Isolate #$isolateIndex is not responsive',
+          ),
+        );
+      }
+      _jobs.remove(jobId);
+      _jobCompleters.remove(jobId);
+    }
+
+    // Fail all pending requests for instances on this isolate
+    final requestsToFail = <int>[];
+    for (final entry in _pooledInstances.entries) {
+      if (entry.value.isolateIndex == isolateIndex) {
+        // Find all requests for this instance
+        // (requests are tracked globally, not per-instance, so we check all)
+        requestsToFail.addAll(_requestCompleters.keys);
+      }
+    }
+
+    for (final requestId in requestsToFail) {
+      final completer = _requestCompleters[requestId];
+      if (completer != null && !completer.isCompleted) {
+        completer.completeError(
+          IsolateDeadException(
+            isolateIndex,
+            'Isolate #$isolateIndex hosting the instance is not responsive',
+          ),
+        );
+      }
+      _requestCompleters.remove(requestId);
+    }
+
+    // Call error handler if registered
+    final exception = IsolateDeadException(
+      isolateIndex,
+      'Isolate #$isolateIndex failed health checks and is considered dead',
+    );
+
+    if (_errorHandlers.containsKey(IsolateErrorType.communication)) {
+      try {
+        _errorHandlers[IsolateErrorType.communication]?.call(exception);
+      } catch (e) {
+        print('Error in communication error handler: $e');
+      }
+    } else if (_errorHandlers.containsKey(IsolateErrorType.all)) {
+      try {
+        _errorHandlers[IsolateErrorType.all]?.call(exception);
+      } catch (e) {
+        print('Error in global error handler: $e');
+      }
+    } else {
+      print('❌ Dead isolate detected: $exception');
     }
   }
 }
