@@ -1,11 +1,12 @@
 {
-    "spellright.language": [
-        "en"
-    ],
-    "spellright.documentTypes": [
-        "dart",
-        "markdown",
-        "latex",
-        "plaintext"
-    ]
+  "spellright.language": [
+    "en"
+  ],
+  "spellright.documentTypes": [
+    "dart",
+    "markdown",
+    "latex",
+    "plaintext"
+  ],
+  "dart.flutterSdkPath": ".fvm/versions/3.35.5"
 }
