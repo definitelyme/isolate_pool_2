@@ -175,11 +175,6 @@ class IsolatePool {
     return _pooledInstances[instance.instanceId]!.isolateIndex;
   }
 
-  /// Check if a PooledInstance is initialized and ready to receive calls
-  bool isInstanceReady(PooledInstanceProxy instance) {
-    return indexOfInstance(instance) != -1 && instance.instanceId != 0 && state == IsolatePoolState.started;
-  }
-
   /// Starts the isolate pool.
   ///
   /// Parameters:
