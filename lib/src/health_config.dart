@@ -1,4 +1,4 @@
-/// Configuration for isolate health checking.
+/// Configuration for IsolatePool health checking.
 ///
 /// Health checking uses [Isolate.ping()] to verify that isolates are
 /// responsive and can still receive messages. This helps detect dead or
