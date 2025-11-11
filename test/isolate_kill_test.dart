@@ -444,5 +444,47 @@ void main() {
         expect(entry.isolateIndex, isNot(equals(1)));
       }
     });
+
+    test('should track alive isolate count correctly', () async {
+      pool = IsolatePool(5);
+      await pool.start();
+
+      // Initial state - all isolates alive
+      expect(pool.numberOfIsolates, equals(5));
+      expect(pool.aliveIsolateCount, equals(5));
+
+      // Kill one isolate
+      pool.killIsolate(2);
+      expect(pool.numberOfIsolates, equals(5)); // numberOfIsolates stays same
+      expect(pool.aliveIsolateCount, equals(4)); // aliveIsolateCount decreases
+
+      // Kill two more isolates
+      pool.killIsolate(0);
+      pool.killIsolate(4);
+      expect(pool.numberOfIsolates, equals(5)); // numberOfIsolates still same
+      expect(pool.aliveIsolateCount, equals(2)); // Only 1 and 3 remain
+
+      // Add a new isolate
+      await pool.addIsolate();
+      expect(pool.numberOfIsolates, equals(6)); // numberOfIsolates increases
+      expect(pool.aliveIsolateCount, equals(3)); // aliveIsolateCount increases
+
+      // Kill another and add another
+      pool.killIsolate(1);
+      expect(pool.aliveIsolateCount, equals(2)); // 3 and 5 remain
+
+      await pool.addIsolate();
+      expect(pool.numberOfIsolates, equals(7));
+      expect(pool.aliveIsolateCount, equals(3)); // 3, 5, and 6 remain
+
+      // Verify remaining isolates work correctly
+      final job3 = await pool.scheduleJob(SimpleJob(10), 3);
+      final job5 = await pool.scheduleJob(SimpleJob(20), 5);
+      final job6 = await pool.scheduleJob(SimpleJob(30), 6);
+
+      expect(job3, equals(20));
+      expect(job5, equals(40));
+      expect(job6, equals(60));
+    });
   });
 }
