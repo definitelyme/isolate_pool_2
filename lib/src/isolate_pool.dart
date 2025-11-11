@@ -42,7 +42,34 @@ class IsolatePool {
   /// Configuration for isolate health checking.
   final IsolateHealthConfig healthConfig;
 
-  /// Number of isolates in the pool.
+  /// Total number of isolate indices allocated in the pool.
+  ///
+  /// This represents the highest isolate index ever assigned + 1, and includes
+  /// both alive and killed isolates to maintain stable indices throughout the
+  /// pool's lifetime.
+  ///
+  /// After killing an isolate with [killIsolate], this value remains unchanged
+  /// to preserve index stability. New isolates added with [addIsolate] will
+  /// receive the next sequential index.
+  ///
+  /// **Important**: This is NOT the count of currently alive isolates.
+  /// Use [aliveIsolateCount] to get the number of active isolates.
+  ///
+  /// Example:
+  /// ```dart
+  /// final pool = IsolatePool(3);
+  /// await pool.start();
+  /// print(pool.numberOfIsolates); // 3
+  /// print(pool.aliveIsolateCount); // 3
+  ///
+  /// pool.killIsolate(1);
+  /// print(pool.numberOfIsolates); // Still 3 (indices: 0, 1, 2)
+  /// print(pool.aliveIsolateCount); // 2 (only 0 and 2 are alive)
+  ///
+  /// await pool.addIsolate();
+  /// print(pool.numberOfIsolates); // 4 (indices: 0, 1, 2, 3)
+  /// print(pool.aliveIsolateCount); // 3 (0, 2, and 3 are alive)
+  /// ```
   int numberOfIsolates;
 
   final Map<int, Completer<PooledInstanceProxy>> _creationCompleters = {};
@@ -108,6 +135,27 @@ class IsolatePool {
 
   /// Number of pooled instances currently managed by this pool.
   int get numberOfPooledInstances => _pooledInstances.length;
+
+  /// Number of currently active isolates in the pool.
+  ///
+  /// This returns the count of active isolates that can accept jobs and instances.
+  /// Unlike [numberOfIsolates], this count decreases when isolates are killed
+  /// and increases when new isolates are added.
+  ///
+  /// Example:
+  /// ```dart
+  /// final pool = IsolatePool(4);
+  /// await pool.start();
+  /// print(pool.aliveIsolateCount); // 4
+  ///
+  /// pool.killIsolate(1);
+  /// pool.killIsolate(3);
+  /// print(pool.aliveIsolateCount); // 2 (only isolates 0 and 2 remain)
+  ///
+  /// await pool.addIsolate();
+  /// print(pool.aliveIsolateCount); // 3 (isolates 0, 2, and 4)
+  /// ```
+  int get aliveIsolateCount => _isolates.length;
 
   /// Map of pooled instances, keyed by instance ID.
   Map<int, InstanceMapEntry> get pooledInstances => _pooledInstances;
@@ -545,6 +593,9 @@ class IsolatePool {
   ///
   /// Other isolates in the pool remain unaffected and continue running normally.
   ///
+  /// **Note**: The [numberOfIsolates] value remains unchanged to maintain index
+  /// stability. Use [aliveIsolateCount] to get the count of active isolates.
+  ///
   /// Parameters:
   /// - [isolateIndex]: The index of the isolate to remove (0 to numberOfIsolates-1)
   ///
@@ -556,11 +607,18 @@ class IsolatePool {
   /// ```dart
   /// final pool = IsolatePool(4);
   /// await pool.start();
+  /// print(pool.numberOfIsolates); // 4
+  /// print(pool.aliveIsolateCount); // 4
   ///
-  /// // Remove isolate at index 2
+  /// // Kill isolate at index 2
   /// pool.killIsolate(2);
   ///
-  /// // Pool now has 3 isolates (indices 0, 1, 3)
+  /// print(pool.numberOfIsolates); // Still 4 (indices 0,1,2,3 allocated)
+  /// print(pool.aliveIsolateCount); // 3 (only 0,1,3 are alive)
+  ///
+  /// // Can still use isolates 0, 1, and 3
+  /// await pool.scheduleJob(MyJob(), 0); // ✓ Works
+  /// await pool.scheduleJob(MyJob(), 2); // ✗ Throws - isolate 2 is dead
   /// ```
   void killIsolate(int isolateIndex) {
     // Validate pool state
