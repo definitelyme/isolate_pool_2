@@ -974,7 +974,7 @@ class IsolatePool {
               '- Ensure your PooledJob only contains sendable fields (primitives, String, List, Map, Set)\n'
               '- Extract necessary data before creating the job\n\n'
               'For best practices, see:\n'
-              '  https://github.com/definitelyme/isolate_pool_2/blob/main/BEST_PRACTICES.md\n\n'
+              '  https://github.com/definitelyme/isolate_pool_2/blob/v4.2.0/BEST_PRACTICES.md\n\n'
               'Original Dart error:\n$errorString',
               st,
             ),
