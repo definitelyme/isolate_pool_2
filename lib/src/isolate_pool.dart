@@ -294,6 +294,13 @@ class IsolatePool {
       );
     }
 
+    // Check if the specific isolate has been killed
+    if (isolateIndex >= 0 && !_isolates.containsKey(isolateIndex)) {
+      throw IsolatePoolException(
+        'Cannot schedule job on isolate $isolateIndex - this isolate has been killed or does not exist.',
+      );
+    }
+
     final jobIndex = _lastJobStartedIndex++;
     final completer = Completer<T>();
 
@@ -339,24 +346,39 @@ class IsolatePool {
     // If a specific isolate is requested and it's valid, use it
     int targetIsolateIndex;
     if (isolateIndex >= 0 && isolateIndex < numberOfIsolates) {
+      // Check if the specific isolate has been killed
+      if (!_isolates.containsKey(isolateIndex)) {
+        throw IsolatePoolException(
+          'Cannot add instance to isolate $isolateIndex - this isolateIndex has been killed or does not exist.',
+        );
+      }
       targetIsolateIndex = isolateIndex;
     } else if (isolateIndex >= numberOfIsolates) {
       throw IsolatePoolException(
         "Invalid isolate index $isolateIndex (only $numberOfIsolates isolates available). Valid indices are 0...${numberOfIsolates - 1}.",
       );
     } else {
-      // Otherwise find the isolate with the fewest instances
+      // Otherwise find the isolate with the fewest instances (that is still alive)
       var min = 10000000; // max number of instances that can be assigned to a single isolate
-      var minIndex = 0; // index of isolate with the least instances
+      var minIndex = -1; // index of isolate with the least instances
 
       // Find the isolate with the fewest instances
       for (var i = 0; i < numberOfIsolates; i++) {
+        // Skip killed isolates
+        if (!_isolates.containsKey(i)) continue;
+
         final instanceCount = _pooledInstances.entries.where((e) => e.value.isolateIndex == i).fold(0, (int prev, _) => prev + 1);
 
         if (instanceCount < min) {
           min = instanceCount;
           minIndex = i;
         }
+      }
+
+      if (minIndex == -1) {
+        throw IsolatePoolException(
+          'No alive isolates available to add instance. All isolates may have been killed.',
+        );
       }
 
       targetIsolateIndex = minIndex;
@@ -510,6 +532,174 @@ class IsolatePool {
     _workerToMainSendPorts.clear();
     _mainToWorkerSendPorts.clear();
     _state = IsolatePoolState.stopped;
+  }
+
+  /// Kills and removes a specific isolate from the pool.
+  ///
+  /// This method completely removes an isolate from the pool, including:
+  /// - Killing the isolate
+  /// - Cancelling all pending jobs on that isolate
+  /// - Destroying all instances on that isolate
+  /// - Cancelling all pending requests for instances on that isolate
+  /// - Cleaning up all associated resources
+  ///
+  /// Other isolates in the pool remain unaffected and continue running normally.
+  ///
+  /// Parameters:
+  /// - [isolateIndex]: The index of the isolate to remove (0 to numberOfIsolates-1)
+  ///
+  /// Throws:
+  /// - [IsolatePoolException] if the isolate index is invalid
+  /// - [IsolatePoolStoppedException] if the pool has been stopped
+  ///
+  /// Example:
+  /// ```dart
+  /// final pool = IsolatePool(4);
+  /// await pool.start();
+  ///
+  /// // Remove isolate at index 2
+  /// pool.killIsolate(2);
+  ///
+  /// // Pool now has 3 isolates (indices 0, 1, 3)
+  /// ```
+  void killIsolate(int isolateIndex) {
+    // Validate pool state
+    if (_state == IsolatePoolState.stopped) {
+      throw IsolatePoolStoppedException('Cannot kill isolate - pool has been stopped');
+    }
+
+    if (_state != IsolatePoolState.started) {
+      throw IsolatePoolException('Cannot kill isolate - pool is not started');
+    }
+
+    // Validate isolate index
+    if (isolateIndex < 0 || isolateIndex >= numberOfIsolates) {
+      throw IsolatePoolException(
+        'Invalid isolate index $isolateIndex. Valid indices are 0...${numberOfIsolates - 1}',
+      );
+    }
+
+    // Check if isolate exists
+    if (!_isolates.containsKey(isolateIndex)) {
+      throw IsolatePoolException('Isolate at index $isolateIndex does not exist or has already been removed');
+    }
+
+    print('⚠️ Killing isolate #$isolateIndex and removing it from the pool');
+
+    // 1. Kill the isolate
+    final isolate = _isolates[isolateIndex];
+    if (isolate != null) {
+      isolate.kill(priority: Isolate.immediate);
+    }
+
+    // 2. Fail all pending jobs for this isolate
+    final jobsToFail = <int>[];
+    for (final entry in _jobs.entries) {
+      if (entry.value.isolateIndex == isolateIndex) {
+        jobsToFail.add(entry.key);
+      }
+    }
+
+    for (final jobId in jobsToFail) {
+      final completer = _jobCompleters[jobId];
+      if (completer != null && !completer.isCompleted) {
+        completer.completeError(
+          IsolatePoolException('Isolate #$isolateIndex was killed - job cancelled'),
+        );
+      }
+      _jobs.remove(jobId);
+      _jobCompleters.remove(jobId);
+    }
+
+    // 3. Fail all pending instance creations for this isolate
+    final instancesToRemove = <int>[];
+    for (final entry in _pooledInstances.entries) {
+      if (entry.value.isolateIndex == isolateIndex) {
+        instancesToRemove.add(entry.key);
+      }
+    }
+
+    for (final instanceId in instancesToRemove) {
+      // Fail creation completer if it exists
+      final creationCompleter = _creationCompleters[instanceId];
+      if (creationCompleter != null && !creationCompleter.isCompleted) {
+        creationCompleter.completeError(
+          IsolatePoolException(
+            'Isolate #$isolateIndex was killed - instance creation cancelled',
+          ),
+        );
+        _creationCompleters.remove(instanceId);
+      }
+
+      // Remove the instance
+      _pooledInstances.remove(instanceId);
+    }
+
+    // 4. Fail all pending requests for instances on this isolate
+    final requestsToFail = <int>[];
+    for (final requestEntry in _requestToInstance.entries) {
+      final requestId = requestEntry.key;
+      final instanceId = requestEntry.value;
+
+      if (instancesToRemove.contains(instanceId)) {
+        requestsToFail.add(requestId);
+      }
+    }
+
+    for (final requestId in requestsToFail) {
+      final completer = _requestCompleters[requestId];
+      if (completer != null && !completer.isCompleted) {
+        completer.completeError(
+          IsolatePoolException(
+            'Isolate #$isolateIndex was killed - request cancelled',
+          ),
+        );
+      }
+      _requestCompleters.remove(requestId);
+      _requestToInstance.remove(requestId);
+    }
+
+    // 5. Clean up ports and communication channels
+    // Find the debug name for this isolate
+    String? debugNameToRemove;
+    for (final entry in _mainReceivePorts.entries) {
+      if (entry.key.endsWith('$isolateIndex')) {
+        debugNameToRemove = entry.key;
+        break;
+      }
+    }
+
+    if (debugNameToRemove != null) {
+      // Close receive ports
+      _mainReceivePorts[debugNameToRemove]?.close();
+      _mainReceivePorts.remove(debugNameToRemove);
+      _mainReceivePortsStreams.remove(debugNameToRemove);
+      _workerToMainSendPorts.remove(debugNameToRemove);
+
+      // Close error ports
+      _poolErrorReceivePorts[debugNameToRemove]?.close();
+      _poolErrorReceivePorts.remove(debugNameToRemove);
+      _poolErrorReceivePortsStreams.remove(debugNameToRemove);
+      _poolErrorSendPorts.remove(debugNameToRemove);
+    }
+
+    // 6. Clean up isolate-specific data structures
+    _isolates.remove(isolateIndex);
+    _mainToWorkerSendPorts.remove(isolateIndex);
+
+    // Mark isolate as not busy
+    if (isolateIndex < _isolateBusyWithJob.length) {
+      _isolateBusyWithJob[isolateIndex] = false;
+    }
+
+    // Remove health tracking
+    _isolateHealth.remove(isolateIndex);
+
+    // Do NOT decrement numberOfIsolates here - keep indices stable
+    // The isolate at index 'isolateIndex' is now permanently removed
+    // but other isolate indices remain unchanged
+
+    print('❌ Isolate #$isolateIndex has been killed and removed from the pool');
   }
 
   /// Adds a single isolate to the running pool.
@@ -865,7 +1055,14 @@ class IsolatePool {
       throw IsolatePoolException("ERROR: No send ports available! Isolates may not be properly initialized.");
     }
 
-    var availableIsolateIndex = _isolateBusyWithJob.indexOf(false);
+    // Find first alive isolate that is not busy
+    var availableIsolateIndex = -1;
+    for (var i = 0; i < _isolateBusyWithJob.length; i++) {
+      if (!_isolateBusyWithJob[i] && _isolates.containsKey(i)) {
+        availableIsolateIndex = i;
+        break;
+      }
+    }
     final pendingJobs = _jobs.entries.where((i) => i.value.started == false);
 
     // print("Available isolate index: $availableIsolateIndex, Pending jobs: ${pendingJobs.length}, Total isolates: ${_isolates.length}");
@@ -876,9 +1073,20 @@ class IsolatePool {
     }
 
     if (availableIsolateIndex == -1) {
-      // Even if all isolates are busy, pick any random isolate to process the job
-      final randomIndex = math.Random().nextInt(numberOfIsolates);
-      availableIsolateIndex = randomIndex;
+      // Even if all isolates are busy, pick any random ALIVE isolate to process the job
+      final aliveIsolates = <int>[];
+      for (var i = 0; i < numberOfIsolates; i++) {
+        if (_isolates.containsKey(i)) {
+          aliveIsolates.add(i);
+        }
+      }
+
+      if (aliveIsolates.isEmpty) {
+        throw IsolatePoolException('No alive isolates available to run jobs. All isolates may have been killed.');
+      }
+
+      final randomIndex = math.Random().nextInt(aliveIsolates.length);
+      availableIsolateIndex = aliveIsolates[randomIndex];
     }
 
     var job = pendingJobs.first.value;
