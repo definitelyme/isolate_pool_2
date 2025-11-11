@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:isolate';
 import 'dart:math' as math;
 
+import 'package:isolate_pool_2/src/internal/utils.dart';
 import 'package:meta/meta.dart';
 
 import 'enums.dart';
@@ -42,7 +43,7 @@ class IsolatePool {
   final IsolateHealthConfig healthConfig;
 
   /// Number of isolates in the pool.
-  final int numberOfIsolates;
+  int numberOfIsolates;
 
   final Map<int, Completer<PooledInstanceProxy>> _creationCompleters = {};
   final List<bool> _isolateBusyWithJob = [];
@@ -62,7 +63,8 @@ class IsolatePool {
   final Map<String, SendPort> _workerToMainSendPorts = {};
 
   double _avgMicroseconds = 0;
-  // Add these properties and methods for error handling
+  FutureOr<void> Function()? _initFn;
+  bool _errorsAreFatal = false;
 
   // Map of error handlers by type
   final Map<IsolateErrorType, void Function(Object error)> _errorHandlers = {};
@@ -158,6 +160,14 @@ class IsolatePool {
     String Function(int)? debugLabel,
     InitializationPolicy policy = InitializationPolicy.concurrent,
   }) async {
+    // Check if already started
+    if (_state != IsolatePoolState.notStarted) {
+      throw IsolatePoolException('Pool has already been started or stopped');
+    }
+
+    _initFn = init;
+    _errorsAreFatal = errorsAreFatal;
+
     print('Creating a pool of $numberOfIsolates running isolates');
 
     _isolatesStarted = 0;
@@ -167,21 +177,30 @@ class IsolatePool {
     final futures = <int, Future<Isolate>>{};
     final stopWatches = <int, Stopwatch>{};
 
+    // Handle empty pool case
+    if (numberOfIsolates == 0) {
+      _state = IsolatePoolState.started;
+      if (!last.isCompleted) {
+        last.complete();
+      }
+      if (!_started.isCompleted) {
+        _started.complete();
+      }
+      return last.future;
+    }
+
     for (var i = 0; i < numberOfIsolates; i++) {
-      _isolateBusyWithJob.add(false);
-      _mainToWorkerSendPorts[i] = null;
+      _initializeIsolateDataStructures(i);
 
       final debugName = debugLabel?.call(i) ?? 'pooled_isolate_$i';
 
-      final receivePort = ReceivePort();
-      _mainReceivePorts[debugName] = receivePort;
-      _mainReceivePortsStreams[debugName] = receivePort.asBroadcastStream();
-      _workerToMainSendPorts[debugName] = receivePort.sendPort;
-
-      final errorRp = ReceivePort();
-      _poolErrorReceivePorts[debugName] = errorRp;
-      _poolErrorReceivePortsStreams[debugName] = errorRp.asBroadcastStream();
-      final errorSendPort = _poolErrorSendPorts[debugName] = errorRp.sendPort;
+      _createIsolatePortsAndListeners(
+        isolateIndex: i,
+        debugName: debugName,
+        last: last,
+        policy: policy,
+        stopWatches: stopWatches,
+      );
 
       final sw = Stopwatch();
 
@@ -191,73 +210,29 @@ class IsolatePool {
         stopWatches.putIfAbsent(i, () => sw);
       }
 
+      final errorSendPort = _poolErrorSendPorts[debugName]!;
+
       final params = PooledIsolateParams(
-        receivePort.sendPort,
+        _workerToMainSendPorts[debugName]!,
         errorSendPort,
         i,
         sw,
-        initFunc: init,
+        initFunc: _initFn,
         policy: policy,
         debugName: debugName,
       );
 
       futures.putIfAbsent(
         i,
-        () => Isolate.spawn<PooledIsolateParams>(
-          pooledIsolateBody,
-          params,
-          errorsAreFatal: errorsAreFatal,
+        () => _spawnSingleIsolate(
+          isolateIndex: i,
+          params: params,
+          errorsAreFatal: _errorsAreFatal,
           debugName: debugName,
-          onError: errorSendPort,
+          errorSendPort: errorSendPort,
           paused: policy == InitializationPolicy.sequential,
         ),
       );
-
-      receivePortsStreamsMap[debugName]!.listen((data) {
-        if (_state == IsolatePoolState.stopped) {
-          // print('Received isolate message when pool is already stopped');
-          errorSendPort.send(IsolatePoolStoppedException(
-            'Isolate pool has been stopped, cannot receive messages. Type: ${data.runtimeType}',
-          ));
-          return;
-        }
-
-        switch (data) {
-          case CreationResponse():
-            _processCreationResponse(data);
-          case Request():
-            _processRequest(data);
-          case Response():
-            processResponse(data, _requestCompleters);
-            // Clean up request tracking (response completes the request)
-            _requestToInstance.remove(data.requestId);
-            // Update health status - successful response means isolate is healthy
-            _updateHealthSuccess(data.isolateIndex);
-          case PooledIsolateParams():
-            _processIsolateStartResult(data, last);
-
-            if (policy == InitializationPolicy.sequential) {
-              final thisIsolateIndex = data.isolateIndex;
-              final nextIsolateIndex = data.nextIsolateIndex;
-              final thisIsolateSw = stopWatches[thisIsolateIndex];
-
-              thisIsolateSw?.stop();
-
-              print('✅ Isolate #$thisIsolateIndex initialized, '
-                  'took ${thisIsolateSw?.elapsedMilliseconds} milliseconds');
-
-              if (nextIsolateIndex == null) return;
-
-              if (nextIsolateIndex == thisIsolateIndex + 1 && nextIsolateIndex < numberOfIsolates) {
-                final nextIsolate = _isolates[nextIsolateIndex];
-                stopWatches[nextIsolateIndex]?.start();
-                nextIsolate?.resume(nextIsolate.pauseCapability!);
-              }
-            }
-          case PooledJobResult():
-            _processJobResult(data);
-        }
-      });
     }
 
     final spawnSw = Stopwatch()..start();
@@ -298,7 +273,13 @@ class IsolatePool {
   /// was caught in the main isolate.
   ///
   /// Throws [IsolatePoolStoppedException] if the pool has been stopped.
-  /// Throws [IsolatePoolException] if the specified isolate index is invalid.
+  /// Throws [IsolatePoolException] if the specified isolate index is invalid or if the job
+  /// contains non-sendable objects (e.g., closures that capture StreamControllers or other
+  /// non-sendable state).
+  ///
+  /// **Important**: If you're using closures in your PooledJob, make sure they don't capture
+  /// non-sendable objects. Prefer static or top-level functions to avoid accidentally
+  /// capturing the entire parent object's state.
   Future<T> scheduleJob<T>(PooledJob<T> job, [int? isolateIndex]) {
     isolateIndex ??= -1;
 
@@ -307,7 +288,7 @@ class IsolatePool {
     }
 
     // Validate isolate index early
-    if (isolateIndex >= numberOfIsolates) {
+    if (isolateIndex < -1 || isolateIndex >= numberOfIsolates) {
       throw IsolatePoolException(
         'Invalid isolate index $isolateIndex (only $numberOfIsolates isolates available). Valid indices are 0...${numberOfIsolates - 1}, or -1 to use any available isolate.',
       );
@@ -407,8 +388,14 @@ class IsolatePool {
       }
     }
 
+    if (sendPort == null) {
+      _creationCompleters.remove(proxy.instanceId);
+      _pooledInstances.remove(proxy.instanceId);
+      throw IsolatePoolException('SendPort is null for isolate $targetIsolateIndex. The isolate may not be fully initialized.');
+    }
+
     try {
-      sendPort!.send(instance); // Send the instance to the isolate
+      sendPort.send(instance);
     } catch (e, st) {
       completer.completeError(e);
       _creationCompleters.remove(proxy.instanceId);
@@ -450,13 +437,32 @@ class IsolatePool {
     }
 
     // Validate isolate index
-    if (targetIndex < 0 || targetIndex >= _mainToWorkerSendPorts.length) {
+    if (targetIndex < 0 || targetIndex >= numberOfIsolates) {
       throw IsolatePoolException(
-        'Invalid isolate index $targetIndex (only ${_mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${_mainToWorkerSendPorts.length - 1}.',
+        'Invalid isolate index $targetIndex (only $numberOfIsolates isolates available). '
+        'Valid indices are 0...${numberOfIsolates - 1}.',
       );
     }
 
-    _mainToWorkerSendPorts[targetIndex]!.send(DestroyRequest(instance.instanceId));
+    // If isolate was explicitly specified, validate that the instance is actually on that isolate
+    if (isolate != null) {
+      final actualIsolateIndex = indexOfInstance(instance);
+      if (actualIsolateIndex != isolate) {
+        throw IsolatePoolException(
+          'Instance ${instance.instanceId} is on isolate $actualIsolateIndex, not on isolate $isolate',
+        );
+      }
+    }
+
+    final sendPort = _mainToWorkerSendPorts[targetIndex];
+
+    if (sendPort == null) {
+      throw IsolatePoolException(
+        'SendPort is null for isolate $targetIndex. The isolate may not be fully initialized.',
+      );
+    }
+    sendPort.send(DestroyRequest(instance.instanceId));
+
     _pooledInstances.remove(instance.instanceId);
   }
 
@@ -477,15 +483,20 @@ class IsolatePool {
 
       for (final completer in _creationCompleters.values) {
         if (!completer.isCompleted) {
-          completer
-              .completeError(IsolatePoolJobCancelledException('Isolate pool stopped upon request, cancelling instance creation requests'));
+          completer.completeError(
+            IsolatePoolJobCancelledException(
+              'Isolate pool stopped upon request, cancelling instance creation requests',
+            ),
+          );
         }
       }
       _creationCompleters.clear();
 
       for (final completer in _requestCompleters.values) {
         if (!completer.isCompleted) {
-          completer.completeError(IsolatePoolJobCancelledException('Isolate pool stopped upon request, cancelling pending request'));
+          completer.completeError(IsolatePoolJobCancelledException(
+            'Isolate pool stopped upon request, cancelling pending request',
+          ));
         }
       }
       _requestCompleters.clear();
@@ -499,6 +510,175 @@ class IsolatePool {
     _workerToMainSendPorts.clear();
     _mainToWorkerSendPorts.clear();
     _state = IsolatePoolState.stopped;
+  }
+
+  /// Adds a single isolate to the running pool.
+  ///
+  /// This method can only be called when the pool is in the [IsolatePoolState.started] state.
+  /// Only one isolate is added at a time to avoid race conditions and manage resources properly.
+  ///
+  /// Parameters:
+  /// - [debugLabel]: Function to generate debug label for the new isolate
+  ///
+  /// Returns the index of the new isolate.
+  ///
+  /// Throws [IsolatePoolException] if:
+  /// - The pool is not in the started state
+  /// - Isolate spawn fails
+  /// - Initialization fails
+  Future<int> addIsolate({
+    String Function(int)? debugLabel,
+  }) async {
+    // Validate pool state
+    if (_state != IsolatePoolState.started) {
+      throw IsolatePoolException(
+        'Cannot add isolate to pool in state $_state.\n'
+        'Pool must be in [started] state. Consider calling the [start()] method first.',
+      );
+    }
+
+    final newIsolateIndex = numberOfIsolates;
+    final debugName = debugLabel?.call(newIsolateIndex) ?? 'pooled_isolate_$newIsolateIndex';
+
+    try {
+      // Initialize data structures for the new isolate
+      _initializeIsolateDataStructures(newIsolateIndex);
+
+      // Create ports and set up listeners
+      _createIsolatePortsAndListeners(
+        isolateIndex: newIsolateIndex,
+        debugName: debugName,
+        last: Completer(), // We don't need to track completion for single isolate
+        policy: InitializationPolicy.concurrent, // Always use concurrent for single isolate
+        stopWatches: {}, // No stopwatch tracking needed for "new" single isolate
+      );
+
+      final errorSendPort = _poolErrorSendPorts[debugName]!;
+
+      final sw = Stopwatch()..start();
+
+      final params = PooledIsolateParams(
+        _workerToMainSendPorts[debugName]!,
+        errorSendPort,
+        newIsolateIndex,
+        sw,
+        initFunc: _initFn,
+        policy: InitializationPolicy.concurrent,
+        debugName: debugName,
+      );
+
+      // Spawn the isolate
+      final isolate = await _spawnSingleIsolate(
+        isolateIndex: newIsolateIndex,
+        params: params,
+        errorsAreFatal: _errorsAreFatal,
+        debugName: debugName,
+        errorSendPort: errorSendPort,
+        paused: false,
+      );
+
+      // Save new isolate
+      _isolates[newIsolateIndex] = isolate;
+
+      // Initialize health tracking for this isolate
+      if (healthConfig.enabled) {
+        _isolateHealth.putIfAbsent(
+          newIsolateIndex,
+          () => IsolateHealthInfo._(isolateIndex: newIsolateIndex),
+        );
+      }
+
+      // ============================================================================
+      // INITIALIZATION HANDSHAKE PROTOCOL
+      // ============================================================================
+      //
+      // This section implements a handshake between the main isolate and the newly
+      // spawned worker isolate to ensure proper initialization before use.
+      //
+      // HOW IT WORKS:
+      // 1. We create a Completer to wait for confirmation that the isolate is ready
+      // 2. We listen to the isolate's message stream for its initialization response
+      // 3. The worker isolate (in pooledIsolateBody) will:
+      //    - Run any init function if provided
+      //    - Send back a PooledIsolateParams message with its SendPort
+      // 4. When we receive that message, we know the isolate is ready to use
+      //
+      // WHY THIS IS NECESSARY:
+      // - Isolate.spawn() returns immediately, but the isolate isn't ready yet
+      // - The worker needs time to set up its ReceivePort and run init code
+      // - Without waiting, we might try to send messages before it's listening
+      //
+      // LINKING WITH MAIN INITIALIZATION FLOW:
+      // This follows the same pattern as start(), but simplified for a single isolate:
+      // - start() spawns multiple isolates and waits for all via a shared Completer
+      // - addIsolate() spawns one isolate and waits for just that one
+      // - Both use the same message protocol: worker sends PooledIsolateParams back
+      // - Both update _mainToWorkerSendPorts with the worker's SendPort
+      // ============================================================================
+      final initCompleter = Completer<void>();
+      StreamSubscription? subscription;
+
+      subscription = receivePortsStreamsMap[debugName]!.listen((data) {
+        if (data is PooledIsolateParams && data.isolateIndex == newIsolateIndex) {
+          // Update the SendPort to the one received from the worker isolate
+          _mainToWorkerSendPorts[newIsolateIndex] = data.sendPort;
+
+          sw.stop();
+
+          if (!isInTest) {
+            print(
+              '[isolate_pool_2]: Isolate #$newIsolateIndex added and initialized, '
+              'took ${sw.elapsedMilliseconds} milliseconds',
+            );
+          }
+
+          if (data.initializationError != null) {
+            initCompleter.completeError(data.initializationError);
+          } else {
+            // Successfully added isolate - increment the count
+            numberOfIsolates++;
+            initCompleter.complete();
+          }
+
+          subscription?.cancel();
+        }
+      });
+
+      // Set up error handling for the new isolate's error port
+      _poolErrorReceivePorts[debugName]!.listen(_handleIsolateError);
+
+      await initCompleter.future;
+
+      return newIsolateIndex;
+    } catch (e, st) {
+      // Rollback on failure
+      _rollbackIsolateAddition(newIsolateIndex, debugName);
+
+      throw IsolatePoolException('Failed to add isolate to pool: $e', st);
+    }
+  }
+
+  /// Rolls back data structures when isolate addition fails.
+  void _rollbackIsolateAddition(int isolateIndex, String debugName) {
+    // Remove from data structures
+    if (isolateIndex < _isolateBusyWithJob.length) {
+      _isolateBusyWithJob.removeLast();
+    }
+
+    _mainToWorkerSendPorts.remove(isolateIndex);
+    _isolates.remove(isolateIndex);
+    _isolateHealth.remove(isolateIndex);
+
+    // Close and remove ports
+    _mainReceivePorts[debugName]?.close();
+    _mainReceivePorts.remove(debugName);
+    _mainReceivePortsStreams.remove(debugName);
+    _workerToMainSendPorts.remove(debugName);
+
+    _poolErrorReceivePorts[debugName]?.close();
+    _poolErrorReceivePorts.remove(debugName);
+    _poolErrorReceivePortsStreams.remove(debugName);
+    _poolErrorSendPorts.remove(debugName);
   }
 
   /// Sets a custom error handler for specific types of isolate errors.
@@ -657,13 +837,22 @@ class IsolatePool {
       return;
     }
 
+    if (sendPort == null) {
+      print(
+        'SendPort is null for isolate ${instance.isolateIndex}.\n'
+        'Cannot process request.',
+      );
+
+      return;
+    }
+
     try {
       final result = instance.instance.remoteCallback!(request.action);
       final response = Response(request.id, result, null);
-      sendPort!.send(response);
+      sendPort.send(response);
     } catch (e) {
       final response = Response(request.id, null, e);
-      sendPort!.send(response);
+      sendPort.send(response);
     }
   }
 
@@ -688,7 +877,7 @@ class IsolatePool {
 
     if (availableIsolateIndex == -1) {
       // Even if all isolates are busy, pick any random isolate to process the job
-      final randomIndex = math.Random().nextInt(_mainToWorkerSendPorts.length);
+      final randomIndex = math.Random().nextInt(numberOfIsolates);
       availableIsolateIndex = randomIndex;
     }
 
@@ -696,17 +885,19 @@ class IsolatePool {
 
     // Use the isolate index specified in the job if it exists, otherwise use the available isolate index
     if (job.isolateIndex < 0 && availableIsolateIndex > -1) {
-      if (availableIsolateIndex > _mainToWorkerSendPorts.length - 1) {
+      if (availableIsolateIndex > numberOfIsolates - 1) {
         throw BadResponseReceivedException(
-          "ERROR: Invalid isolate index $availableIsolateIndex (only ${_mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${_mainToWorkerSendPorts.length - 1}.",
+          "ERROR: Invalid isolate index $availableIsolateIndex (only $numberOfIsolates isolates available).\n"
+          "Valid indices are 0...${numberOfIsolates - 1}.",
           StackTrace.current,
         );
       }
 
       job = job.copyWith(isolateIndex: availableIsolateIndex);
-    } else if (job.isolateIndex > _mainToWorkerSendPorts.length - 1) {
+    } else if (job.isolateIndex > numberOfIsolates - 1) {
       throw BadResponseReceivedException(
-        "ERROR: Invalid isolate index ${job.isolateIndex} (only ${_mainToWorkerSendPorts.length} isolates available). Valid indices are 0...${_mainToWorkerSendPorts.length - 1}.",
+        "ERROR: Invalid isolate index ${job.isolateIndex} (only $numberOfIsolates isolates available).\n"
+        "Valid indices are 0...${numberOfIsolates - 1}.",
         StackTrace.current,
       );
     }
@@ -716,6 +907,7 @@ class IsolatePool {
         _ensureIsolateHealthy(job.isolateIndex).then((isHealthy) {
           if (!isHealthy) {
             print("❌ Isolate ${job.isolateIndex} is not healthy, failing job ${job.jobIndex}");
+
             _handleDeadIsolate(job.isolateIndex);
 
             // Job completer should already be failed by _handleDeadIsolate
@@ -737,21 +929,74 @@ class IsolatePool {
     try {
       job = job.copyWith(started: true);
 
-      print("[Sending job ${job.jobIndex} to isolate ${job.isolateIndex}]");
+      if (!isInTest) {
+        print("[Sending job ${job.jobIndex} to isolate ${job.isolateIndex}]");
+      }
 
       // Mark the isolate as busy before sending the job
       _isolateBusyWithJob[job.isolateIndex] = true;
 
       final sendPort = _mainToWorkerSendPorts[job.isolateIndex];
-      sendPort!.send(job);
-    } catch (e) {
+
+      if (sendPort == null) {
+        throw IsolatePoolException(
+          'SendPort is null for isolate ${job.isolateIndex}.\n'
+          'The isolate may not be fully initialized.',
+        );
+      }
+
+      sendPort.send(job);
+
+      // Update the job in the map only if send succeeded
+      _jobs[job.jobIndex] = job;
+    } catch (e, st) {
+      // Check if this is the unsendable closure error
+      final errorString = e.toString();
+      if (errorString.contains('unsendable') || errorString.contains('Illegal argument')) {
+        print("❌ UNSENDABLE OBJECT ERROR: Job ${job.jobIndex} contains non-sendable objects");
+
+        final completer = _jobCompleters[job.jobIndex];
+
+        if (completer != null && !completer.isCompleted) {
+          completer.completeError(
+            IsolatePoolException(
+              'Failed to send job of type ${job.job.runtimeType} to isolate. '
+              'This is likely because your PooledJob uses a closure that captures '
+              'non-sendable objects.\n\n'
+              'Common causes:\n'
+              '1. Using a closure (anonymous function) that captures "this" context\n'
+              '   which contains StreamController, Completer, ReceivePort, or other non-sendable objects\n'
+              '2. Closure captures variables from outer scope that contain non-sendable objects\n'
+              '3. PooledJob fields directly contain non-sendable objects\n\n'
+              'Solutions:\n'
+              '- Use static or top-level functions instead of closures\n'
+              '- Pass function references instead of defining closures inline\n'
+              '- Ensure your PooledJob only contains sendable fields (primitives, String, List, Map, Set)\n'
+              '- Extract necessary data before creating the job\n\n'
+              'For best practices, see:\n'
+              '  https://github.com/definitelyme/isolate_pool_2/blob/main/BEST_PRACTICES.md\n\n'
+              'Original Dart error:\n$errorString',
+              st,
+            ),
+          );
+        }
+
+        // Clean up state to keep isolate functional
+        _jobs.remove(job.jobIndex);
+        _jobCompleters.remove(job.jobIndex);
+        _isolateBusyWithJob[job.isolateIndex] = false;
+
+        // Try to dispatch the next pending job if any
+        _runJobWithVacantIsolate();
+        return;
+      }
+
+      // For other errors, mark job as not started and keep it tracked
       print("❌ ERROR sending job to isolate: $e");
       job = job.copyWith(started: false);
       _isolateBusyWithJob[job.isolateIndex] = false;
+      _jobs[job.jobIndex] = job;
     }
-
-    // Update the job in the map
-    _jobs[job.jobIndex] = job;
   }
 
   /// Central handler for errors received from isolates via error ports.
@@ -858,6 +1103,99 @@ class IsolatePool {
   @internal
   void trackRequestToInstanceInternal(int requestId, int instanceId) {
     _requestToInstance[requestId] = instanceId;
+  }
+
+  /// Creates ports and sets up listeners for any single isolate.
+  void _createIsolatePortsAndListeners({
+    required int isolateIndex,
+    required String debugName,
+    required Completer last,
+    required InitializationPolicy policy,
+    required Map<int, Stopwatch> stopWatches,
+  }) {
+    // Create main communication ports
+    final receivePort = ReceivePort();
+    _mainReceivePorts[debugName] = receivePort;
+    _mainReceivePortsStreams[debugName] = receivePort.asBroadcastStream();
+    _workerToMainSendPorts[debugName] = receivePort.sendPort;
+
+    // Create error handling ports
+    final errorRp = ReceivePort();
+    _poolErrorReceivePorts[debugName] = errorRp;
+    _poolErrorReceivePortsStreams[debugName] = errorRp.asBroadcastStream();
+    _poolErrorSendPorts[debugName] = errorRp.sendPort;
+
+    // Set up listener
+    receivePortsStreamsMap[debugName]!.listen((data) {
+      if (_state == IsolatePoolState.stopped) {
+        _poolErrorSendPorts[debugName]?.send(
+          IsolatePoolStoppedException('Isolate pool has been stopped, cannot receive messages. Type: ${data.runtimeType}'),
+        );
+        return;
+      }
+
+      switch (data) {
+        case CreationResponse():
+          _processCreationResponse(data);
+        case Request():
+          _processRequest(data);
+        case Response():
+          processResponse(data, _requestCompleters);
+          _requestToInstance.remove(data.requestId);
+          _updateHealthSuccess(data.isolateIndex);
+        case PooledIsolateParams():
+          _processIsolateStartResult(data, last);
+
+          if (policy == InitializationPolicy.sequential) {
+            final thisIsolateIndex = data.isolateIndex;
+            final nextIsolateIndex = data.nextIsolateIndex;
+            final thisIsolateSw = stopWatches[thisIsolateIndex];
+
+            thisIsolateSw?.stop();
+
+            print(
+              '✅ Isolate #$thisIsolateIndex initialized, '
+              'took ${thisIsolateSw?.elapsedMilliseconds} milliseconds',
+            );
+
+            if (nextIsolateIndex == null) return;
+
+            if (nextIsolateIndex == thisIsolateIndex + 1 && nextIsolateIndex < numberOfIsolates) {
+              final nextIsolate = _isolates[nextIsolateIndex];
+              stopWatches[nextIsolateIndex]?.start();
+              nextIsolate?.resume(nextIsolate.pauseCapability!);
+            }
+          }
+        case PooledJobResult():
+          _processJobResult(data);
+      }
+    });
+  }
+
+  /// Initializes data structures for a single isolate.
+  void _initializeIsolateDataStructures(int isolateIndex) {
+    _isolateBusyWithJob.add(false);
+    _mainToWorkerSendPorts[isolateIndex] = null;
+  }
+
+  /// Spawns a single isolate with the given parameters.
+  /// Returns a Future that completes with the spawned Isolate.
+  Future<Isolate> _spawnSingleIsolate({
+    required int isolateIndex,
+    required PooledIsolateParams params,
+    required bool errorsAreFatal,
+    required String debugName,
+    required SendPort errorSendPort,
+    required bool paused,
+  }) {
+    return Isolate.spawn<PooledIsolateParams>(
+      pooledIsolateBody,
+      params,
+      errorsAreFatal: errorsAreFatal,
+      debugName: debugName,
+      onError: errorSendPort,
+      paused: paused,
+    );
   }
 
   // ============================================================================

@@ -10,7 +10,14 @@ class IsolatePoolException implements Exception {
   const IsolatePoolException(this.message, [this.stackTrace]);
 
   @override
-  String toString() => '$message${stackTrace != null ? '\n$stackTrace' : ''}';
+  String toString() {
+    final msg = switch (stackTrace) {
+      _ when stackTrace != StackTrace.empty => '$message\n$stackTrace',
+      _ => message,
+    };
+
+    return msg;
+  }
 }
 
 /// Thrown when attempting to use a non-existent isolate instance.
@@ -53,12 +60,21 @@ class IsolateError extends IsolatePoolException {
   final StackTrace originalStackTrace;
 
   /// Creates a new [IsolateError] with the given [originalError].
-  const IsolateError(this.originalError, this.isolateIndex, String message, [this.originalStackTrace = StackTrace.empty])
-      : super(message, originalStackTrace);
+  const IsolateError(
+    this.originalError,
+    this.isolateIndex,
+    String message, [
+    this.originalStackTrace = StackTrace.empty,
+  ]) : super(message, originalStackTrace);
 
   @override
   String toString() {
-    return 'Error in isolate #$isolateIndex: $message${originalStackTrace != StackTrace.empty ? '\n$originalStackTrace' : ''}';
+    final msg = switch (originalStackTrace) {
+      _ when originalStackTrace != StackTrace.empty => '$message\n$originalStackTrace',
+      _ => message,
+    };
+
+    return 'Error in isolate #$isolateIndex: $msg';
   }
 
   /// Returns the original error unwrapped.
@@ -91,10 +107,21 @@ class IsolateInitializationException extends IsolatePoolException {
   /// The isolate index that failed to initialize.
   final int isolateIndex;
 
-  const IsolateInitializationException(this.isolateIndex, super.message, [super.stackTrace]);
+  const IsolateInitializationException(
+    this.isolateIndex,
+    super.message, [
+    super.stackTrace,
+  ]);
 
   @override
-  String toString() => 'Failed to initialize isolate #$isolateIndex: $message${stackTrace != null ? '\n$stackTrace' : ''}';
+  String toString() {
+    final msg = switch (stackTrace) {
+      _ when stackTrace != StackTrace.empty => '$message\n$stackTrace',
+      _ => message,
+    };
+
+    return 'Failed to initialize isolate #$isolateIndex: $msg';
+  }
 }
 
 /// Thrown when a timeout occurs while waiting for an isolate operation.
@@ -104,10 +131,22 @@ class IsolateTimeoutException extends IsolatePoolException {
   /// The timeout duration in milliseconds.
   final int timeoutMs;
 
-  const IsolateTimeoutException(this.operation, this.timeoutMs, super.message, [super.stackTrace]);
+  const IsolateTimeoutException(
+    this.operation,
+    this.timeoutMs,
+    super.message, [
+    super.stackTrace,
+  ]);
 
   @override
-  String toString() => '$operation timed out after $timeoutMs ms: $message${stackTrace != null ? '\n$stackTrace' : ''}';
+  String toString() {
+    final msg = switch (stackTrace) {
+      _ when stackTrace != StackTrace.empty => '$message\n$stackTrace',
+      _ => message,
+    };
+
+    return '$operation timed out after $timeoutMs ms: $msg';
+  }
 }
 
 /// Thrown when an isolate is detected as dead or unresponsive.
@@ -118,8 +157,19 @@ class IsolateDeadException extends IsolatePoolException {
   /// The isolate index that is dead or unresponsive.
   final int isolateIndex;
 
-  const IsolateDeadException(this.isolateIndex, super.message, [super.stackTrace]);
+  const IsolateDeadException(
+    this.isolateIndex,
+    super.message, [
+    super.stackTrace,
+  ]);
 
   @override
-  String toString() => 'Isolate #$isolateIndex is dead or unresponsive: $message${stackTrace != null ? '\n$stackTrace' : ''}';
+  String toString() {
+    final msg = switch (stackTrace) {
+      _ when stackTrace != StackTrace.empty => '$message\n$stackTrace',
+      _ => message,
+    };
+
+    return 'Isolate #$isolateIndex is dead or unresponsive: $msg';
+  }
 }

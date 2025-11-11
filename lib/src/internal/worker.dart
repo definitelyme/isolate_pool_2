@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:isolate';
 
+import 'package:isolate_pool_2/src/internal/utils.dart';
+
 import '../enums.dart';
 import '../exceptions.dart';
 import '../pooled_instance.dart';
@@ -164,7 +166,9 @@ void pooledIsolateBody(PooledIsolateParams params) async {
   ));
 
   if (params.policy == InitializationPolicy.concurrent) {
-    print('[isolate_pool_2]: Isolate #${params.isolateIndex} initialized, '
-        'took ${params.stopwatch.elapsedMilliseconds} milliseconds');
+    if (!isInTest) {
+      print('[isolate_pool_2]: Isolate #${params.isolateIndex} initialized, '
+          'took ${params.stopwatch.elapsedMilliseconds} milliseconds');
+    }
   }
 }

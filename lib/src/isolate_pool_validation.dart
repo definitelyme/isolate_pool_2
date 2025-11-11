@@ -33,7 +33,7 @@ bool canBeSentToIsolate(dynamic object) {
       object is Stream ||
       object is StreamController ||
       object is StreamSubscription ||
-      object is Future ||
+      object is Completer ||
       object.runtimeType.toString().contains('Completer') ||
       object.runtimeType.toString().contains('Finalizable') ||
       object.runtimeType.toString().contains('Finalizer') ||
@@ -101,7 +101,7 @@ extension PooledInstanceValidation on PooledInstance {
           '- Finalizable, Finalizer, NativeFinalizer\n'
           '- UserTag\n'
           '- Stream, StreamController, StreamSubscription\n'
-          '- Future, Completer\n'
+          '- Completer\n'
           '- PooledInstanceProxy\n'
           '- IsolatePool\n'
           '- Function references from main isolate\n\n'

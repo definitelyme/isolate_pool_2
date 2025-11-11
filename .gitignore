@@ -26,5 +26,8 @@ doc/api/
 .flutter-plugins
 .flutter-plugins-dependencies
 
+.claude/
+coverage/
+
 # FVM Version Cache
 .fvm/

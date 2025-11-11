@@ -101,11 +101,15 @@ class IsolateHealthConfig {
         checkBeforeDispatching = false;
 
   @override
-  String toString() => 'IsolateHealthConfig('
-      'enabled: $enabled, '
-      'pingTimeout: $pingTimeout, '
-      'stalenessThreshold: $stalenessThreshold, '
-      'maxConsecutiveFailures: $maxConsecutiveFailures, '
-      'checkBeforeDispatching: $checkBeforeDispatching'
-      ')';
+  String toString() {
+    final msg = StringBuffer('IsolateHealthConfig(')
+      ..writeln('enabled: $enabled, ')
+      ..writeln('pingTimeout: $pingTimeout, ')
+      ..writeln('stalenessThreshold: $stalenessThreshold, ')
+      ..writeln('maxConsecutiveFailures: $maxConsecutiveFailures, ')
+      ..writeln('checkBeforeDispatching: $checkBeforeDispatching')
+      ..writeln(')');
+
+    return msg.toString();
+  }
 }
