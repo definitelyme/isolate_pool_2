@@ -775,7 +775,7 @@ class IsolatePool {
   /// - Isolate spawn fails
   /// - Initialization fails
   Future<int> addIsolate({
-    String Function(int)? debugLabel,
+    String? debugLabel,
   }) async {
     // Validate pool state
     if (_state != IsolatePoolState.started) {
@@ -786,7 +786,10 @@ class IsolatePool {
     }
 
     final newIsolateIndex = numberOfIsolates;
-    final debugName = debugLabel?.call(newIsolateIndex) ?? 'pooled_isolate_$newIsolateIndex';
+    final debugName = switch (debugLabel) {
+      null => 'pooled_isolate_$newIsolateIndex',
+      String() => '${debugLabel}_$newIsolateIndex',
+    };
 
     try {
       // Initialize data structures for the new isolate
